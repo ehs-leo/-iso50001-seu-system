@@ -251,6 +251,17 @@ def _sf(v):
     except:
         return None
 
+def _si(v):
+    """安全轉整數（給 Supabase 的 integer 欄位用，例如 install_year／age_years）。
+    PostgREST 對 integer 欄位很嚴格，收到帶小數點的數字（如 18.0）會直接報錯，
+    必須送真正的整數，不能送浮點數。"""
+    try:
+        if v is None: return None
+        if isinstance(v, float) and math.isnan(v): return None
+        return int(float(v))
+    except:
+        return None
+
 def read_system(sheet, sys_label):
     try:
         df = pd.read_excel(EXCEL_FILE, sheet_name=sheet, header=None)
@@ -684,7 +695,7 @@ def push_equipment_to_supabase(records):
                 "floor": rec.get("所在樓層"), "power_kw": _sf(rec.get("消耗功率(kW)")),
                 "quantity": _sf(rec.get("設備數量")), "load_rate": _sf(rec.get("負載率")),
                 "operating_hours": _sf(rec.get("運轉時數(hr/年)")),
-                "install_year": _sf(rec.get("設備年份")), "age_years": _sf(rec.get("使用年數")),
+                "install_year": _si(rec.get("設備年份")), "age_years": _si(rec.get("使用年數")),
                 "criticality": _sf(rec.get("自評重大性")), "manager": rec.get("設備管理者"),
                 "contractor": rec.get("外包商承攬商"), "related_vars": rec.get("相關變數"),
                 "appearance_photo_path": appearance_path, "nameplate_photo_path": nameplate_path,
