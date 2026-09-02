@@ -14,6 +14,43 @@ from PIL import Image
 from datetime import datetime
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Helper: 照片壓縮
+#   目的：使用者手機拍照隨便就是 3~8MB 一張，335 台設備 x 2 張(外觀+銘牌)
+#   累積起來很快就會撞到 Streamlit Cloud 的記憶體上限（約 1GB）跟 Supabase
+#   免費方案的 1GB 儲存空間。統一在「存進資料庫之前」做兩件事：
+#     1. 縮小尺寸：長邊超過 MAX_DIM 就等比例縮小（現場設備照片不需要原始解析度）
+#     2. 轉成 JPEG 並壓縮品質：PNG/HEIC 等格式統一轉為 JPEG，去除不需要的透明度、
+#        大幅縮小檔案體積
+# ─────────────────────────────────────────────────────────────────────────────
+PHOTO_MAX_DIM = 1600   # 長邊像素上限，一般設備現場照片這個解析度已經很夠看
+PHOTO_QUALITY = 82     # JPEG 壓縮品質（1~95），82 是畫質與檔案大小的合理平衡點
+
+def compress_photo_bytes(raw_bytes, max_dim=PHOTO_MAX_DIM, quality=PHOTO_QUALITY):
+    """把任意圖片位元組壓縮成較小的 JPEG 位元組。
+    輸入格式失敗時（例如檔案損毀），直接回傳原始位元組，不讓壓縮失敗擋住整個上傳流程。"""
+    try:
+        img = Image.open(BytesIO(raw_bytes))
+        img = img.convert("RGB")   # 去除透明度／調色盤，JPEG 不支援透明通道
+        w, h = img.size
+        longest = max(w, h)
+        if longest > max_dim:
+            scale = max_dim / longest
+            img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        return buf.getvalue()
+    except Exception:
+        return raw_bytes
+
+def compress_photo_to_b64(uploaded_file, max_dim=PHOTO_MAX_DIM, quality=PHOTO_QUALITY):
+    """接收 st.file_uploader 回傳的檔案物件，壓縮後回傳 (base64字串, 原始KB, 壓縮後KB)"""
+    raw_bytes = uploaded_file.read()
+    original_kb = len(raw_bytes) / 1024
+    compressed_bytes = compress_photo_bytes(raw_bytes, max_dim, quality)
+    compressed_kb = len(compressed_bytes) / 1024
+    return base64.b64encode(compressed_bytes).decode(), original_kb, compressed_kb
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Helper: 置中表格
 # ─────────────────────────────────────────────────────────────────────────────
 def centered_table(df, context="default"):
@@ -124,14 +161,28 @@ BUILTIN_DATA_JSON = "builtin_equipment_data.json"  # ← 內建示範設備資�
 def _find_excel_file(keyword, fallback):
     """在目前工作目錄尋找檔名內含 keyword 的 .xlsx 檔（自動忽略 Excel 開啟時產生的
     ~$ 暫存鎖定檔）。因為實際檔案常有日期前綴（如「2025_12_15-XXX.xlsx」），
-    用關鍵字比對比要求檔名完全一致更穩妥。若有多個符合，取『最後修改時間』最新的一個；
+    用關鍵字比對比要求檔名完全一致更穩妥。
+
+    若有多個符合，優先依『檔名中的日期』挑最新的一個（例如 2026_01_10 排在 2025_12_15 前面）；
+    這比用檔案的『最後修改時間』可靠——因為部署在 Streamlit Cloud 時，
+    每次重新部署都是重新 git checkout 整個專案，所有檔案的修改時間會被重設成同一個時間點，
+    用修改時間排序在雲端環境會抓不準誰是真正比較新的檔案。
     完全找不到的話，回傳 fallback（維持原行為，後續程式用 os.path.exists 判斷即可）。"""
     try:
         candidates = [c for c in glob.glob(f"*{keyword}*.xlsx")
                       if not os.path.basename(c).startswith("~$")]
-        if candidates:
-            candidates.sort(key=os.path.getmtime, reverse=True)
-            return candidates[0]
+        if not candidates:
+            return fallback
+
+        def _sort_key(path):
+            name = os.path.basename(path)
+            m = re.search(r"(\d{4})[_-](\d{1,2})[_-](\d{1,2})", name)
+            if m:
+                y, mo, d = (int(x) for x in m.groups())
+                return (1, y, mo, d)          # 檔名含日期：依日期排序，越新越前面
+            return (0, 0, 0, 0)                # 檔名沒有日期：視為最舊，排在有日期的檔案之後
+        candidates.sort(key=_sort_key, reverse=True)
+        return candidates[0]
     except Exception:
         pass
     return fallback
@@ -557,6 +608,318 @@ def read_enb_equipment_from_excel():
     return equipment_list, None
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 3-2. Supabase 雲端同步（取代/輔助本地 JSON 檔案，解決 Streamlit Cloud
+#      重新部署後資料被清空的問題）
+#      設計原則：
+#      - 完全「選用」：沒有在 Streamlit Secrets 設定 SUPABASE_URL／
+#        SUPABASE_SERVICE_KEY 的話，以下所有函式都會安靜地回傳失敗，
+#        程式會自動退回原本的本地 JSON 檔案，不會讓 app 壞掉。
+#      - 用 service_role 金鑰連線（在伺服器端執行，不會外流到瀏覽器），
+#        所以資料表的 Row Level Security 直接關閉，權限控管交給
+#        app.py 自己的管理員密碼機制。
+#      - 照片不存進資料庫欄位（會讓資料庫肥大、逼近 500MB 上限），
+#        而是上傳到 Supabase Storage 的 equipment-photos bucket，
+#        資料庫欄位只存檔案路徑。
+# ─────────────────────────────────────────────────────────────────────────────
+_SUPABASE_CLIENT = None
+_SUPABASE_TRIED = False
+
+def get_supabase_client():
+    """回傳 Supabase client；沒有設定 Secrets 或連線失敗就回傳 None
+    （呼叫端要自己處理 None 的情況，退回本地檔案）。同一次執行只嘗試建立一次連線。"""
+    global _SUPABASE_CLIENT, _SUPABASE_TRIED
+    if _SUPABASE_TRIED:
+        return _SUPABASE_CLIENT
+    _SUPABASE_TRIED = True
+    try:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_SERVICE_KEY"]
+        from supabase import create_client
+        _SUPABASE_CLIENT = create_client(url, key)
+    except Exception:
+        _SUPABASE_CLIENT = None
+    return _SUPABASE_CLIENT
+
+SUPABASE_PHOTO_BUCKET = "equipment-photos"
+
+def _sb_upload_photo(sb, b64_str, path):
+    """把 base64 照片上傳到 Storage，回傳存進資料庫欄位用的路徑字串；沒有照片就回傳 None"""
+    if not b64_str:
+        return None
+    try:
+        raw = base64.b64decode(b64_str)
+        sb.storage.from_(SUPABASE_PHOTO_BUCKET).upload(
+            path, raw, {"content-type": "image/jpeg", "upsert": "true"}
+        )
+        return path
+    except Exception:
+        return None
+
+def _sb_download_photo(sb, path):
+    """從 Storage 下載照片，回傳 base64 字串；找不到就回傳 None"""
+    if not path:
+        return None
+    try:
+        raw = sb.storage.from_(SUPABASE_PHOTO_BUCKET).download(path)
+        return base64.b64encode(raw).decode()
+    except Exception:
+        return None
+
+# ── 設備盤查資料（equipment 資料表） ────────────────────────────────────────
+def push_equipment_to_supabase(records):
+    """把目前的設備清單（含照片）整批上傳到 Supabase，回傳 (成功與否, 訊息)"""
+    sb = get_supabase_client()
+    if not sb:
+        return False, "尚未設定 Supabase 連線資訊（SUPABASE_URL／SUPABASE_SERVICE_KEY）"
+    try:
+        rows = []
+        for i, rec in enumerate(records):
+            code = str(rec.get("設備編號") or f"NOID_{i}").strip() or f"NOID_{i}"
+            appearance_path = _sb_upload_photo(sb, rec.get("外觀照片"), f"{code}_appearance.jpg")
+            nameplate_path  = _sb_upload_photo(sb, rec.get("銘牌照片"),  f"{code}_nameplate.jpg")
+            rows.append({
+                "system_name": rec.get("系統別"), "equipment_name": rec.get("設備名稱"),
+                "equipment_code": code, "equipment_type": rec.get("設備型式"),
+                "department": rec.get("設備部門"), "building": rec.get("所在棟別"),
+                "floor": rec.get("所在樓層"), "power_kw": _sf(rec.get("消耗功率(kW)")),
+                "quantity": _sf(rec.get("設備數量")), "load_rate": _sf(rec.get("負載率")),
+                "operating_hours": _sf(rec.get("運轉時數(hr/年)")),
+                "install_year": _sf(rec.get("設備年份")), "age_years": _sf(rec.get("使用年數")),
+                "criticality": _sf(rec.get("自評重大性")), "manager": rec.get("設備管理者"),
+                "contractor": rec.get("外包商承攬商"), "related_vars": rec.get("相關變數"),
+                "appearance_photo_path": appearance_path, "nameplate_photo_path": nameplate_path,
+            })
+        # 用「整批清空重寫」而非逐列比對更新，邏輯最單純可靠，335 筆規模也很快
+        sb.table("equipment").delete().neq("id", -1).execute()
+        batch = 100
+        for i in range(0, len(rows), batch):
+            sb.table("equipment").insert(rows[i:i+batch]).execute()
+        return True, f"已上傳 {len(rows)} 筆設備資料到 Supabase"
+    except Exception as e:
+        return False, f"上傳失敗：{e}"
+
+def pull_equipment_from_supabase():
+    """從 Supabase 下載設備清單（含照片），回傳 (records 或 None, 錯誤訊息)"""
+    sb = get_supabase_client()
+    if not sb:
+        return None, "尚未設定 Supabase 連線資訊"
+    try:
+        resp = sb.table("equipment").select("*").execute()
+        rows = resp.data or []
+        if not rows:
+            return None, "Supabase 的 equipment 資料表目前是空的"
+        records = []
+        for row in rows:
+            records.append({
+                "系統別": row.get("system_name"), "設備名稱": row.get("equipment_name"),
+                "設備編號": row.get("equipment_code"), "設備型式": row.get("equipment_type"),
+                "設備部門": row.get("department"), "所在棟別": row.get("building"),
+                "所在樓層": row.get("floor"), "消耗功率(kW)": row.get("power_kw"),
+                "設備數量": row.get("quantity"), "負載率": row.get("load_rate"),
+                "運轉時數(hr/年)": row.get("operating_hours"), "設備年份": row.get("install_year"),
+                "使用年數": row.get("age_years"), "自評重大性": row.get("criticality"),
+                "設備管理者": row.get("manager"), "外包商承攬商": row.get("contractor"),
+                "相關變數": row.get("related_vars"),
+                "外觀照片": _sb_download_photo(sb, row.get("appearance_photo_path")),
+                "銘牌照片": _sb_download_photo(sb, row.get("nameplate_photo_path")),
+            })
+        return records, None
+    except Exception as e:
+        return None, f"下載失敗：{e}"
+
+# ── 能源基線追蹤－每月單位產量耗能 ──────────────────────────────────────────
+def push_enb_monthly_unit_to_supabase(data, year=None):
+    sb = get_supabase_client()
+    if not sb:
+        return False, "尚未設定 Supabase 連線資訊"
+    year = year or datetime.now().year
+    try:
+        rows = []
+        for i, m in enumerate(range(1, 13)):
+            rows.append({
+                "year": year, "month": m,
+                "kwh": data["kwh"][i], "production": data["production"][i],
+                "std_baseline": data["std"][i], "adj_upper": data["adj_upper"][i],
+                "adj_lower": data["adj_lower"][i], "note": data["note"][i],
+                "reason": data["reason"][i], "action": data["action"][i],
+            })
+        sb.table("enb_monthly_unit").upsert(rows, on_conflict="year,month").execute()
+        return True, "已上傳「單位產量耗能」到 Supabase"
+    except Exception as e:
+        return False, f"上傳失敗：{e}"
+
+def pull_enb_monthly_unit_from_supabase(year=None):
+    sb = get_supabase_client()
+    if not sb:
+        return None, "尚未設定 Supabase 連線資訊"
+    year = year or datetime.now().year
+    try:
+        resp = sb.table("enb_monthly_unit").select("*").eq("year", year).order("month").execute()
+        rows = resp.data or []
+        if not rows:
+            return None, f"Supabase 裡找不到 {year} 年的單位產量耗能資料"
+        by_month = {r["month"]: r for r in rows}
+        data = {"kwh": [], "production": [], "std": [], "adj_upper": [], "adj_lower": [],
+                "note": [], "reason": [], "action": []}
+        for m in range(1, 13):
+            r = by_month.get(m, {})
+            data["kwh"].append(r.get("kwh")); data["production"].append(r.get("production"))
+            data["std"].append(r.get("std_baseline")); data["adj_upper"].append(r.get("adj_upper"))
+            data["adj_lower"].append(r.get("adj_lower")); data["note"].append(r.get("note") or "")
+            data["reason"].append(r.get("reason") or ""); data["action"].append(r.get("action") or "")
+        return data, None
+    except Exception as e:
+        return None, f"下載失敗：{e}"
+
+# ── 能源基線追蹤－整廠用電量 ────────────────────────────────────────────────
+def push_enb_plant_to_supabase(data, year=None):
+    sb = get_supabase_client()
+    if not sb:
+        return False, "尚未設定 Supabase 連線資訊"
+    year = year or datetime.now().year
+    try:
+        rows = []
+        for i, m in enumerate(range(1, 13)):
+            rows.append({
+                "year": year, "month": m,
+                "actual_kwh": data["actual"][i], "baseline_prev_kwh": data["baseline_prev"][i],
+                "adj_upper": data["adj_upper"][i], "adj_lower": data["adj_lower"][i],
+                "reason": data["reason"][i], "action": data["action"][i],
+            })
+        sb.table("enb_plant").upsert(rows, on_conflict="year,month").execute()
+        return True, "已上傳「整廠用電量」到 Supabase"
+    except Exception as e:
+        return False, f"上傳失敗：{e}"
+
+def pull_enb_plant_from_supabase(year=None):
+    sb = get_supabase_client()
+    if not sb:
+        return None, "尚未設定 Supabase 連線資訊"
+    year = year or datetime.now().year
+    try:
+        resp = sb.table("enb_plant").select("*").eq("year", year).order("month").execute()
+        rows = resp.data or []
+        if not rows:
+            return None, f"Supabase 裡找不到 {year} 年的整廠用電量資料"
+        by_month = {r["month"]: r for r in rows}
+        data = {"actual": [], "baseline_prev": [], "adj_upper": [], "adj_lower": [],
+                "reason": [], "action": []}
+        for m in range(1, 13):
+            r = by_month.get(m, {})
+            data["actual"].append(r.get("actual_kwh")); data["baseline_prev"].append(r.get("baseline_prev_kwh"))
+            data["adj_upper"].append(r.get("adj_upper")); data["adj_lower"].append(r.get("adj_lower"))
+            data["reason"].append(r.get("reason") or ""); data["action"].append(r.get("action") or "")
+        return data, None
+    except Exception as e:
+        return None, f"下載失敗：{e}"
+
+# ── 能源基線追蹤－重大能源使用設備（動態子表） ──────────────────────────────
+def push_enb_equipment_to_supabase(equipment_list):
+    sb = get_supabase_client()
+    if not sb:
+        return False, "尚未設定 Supabase 連線資訊"
+    try:
+        rows = []
+        for eq in equipment_list:
+            diff = eq.get("diff", {})
+            for i, m in enumerate(eq["months"]):
+                d = diff.get(m, {}) if isinstance(diff, dict) else diff.get(str(m), {})
+                rows.append({
+                    "title": eq["title"], "numerator_label": eq["numerator_label"],
+                    "denominator_label": eq["denominator_label"], "month": m,
+                    "numerator": eq["numerator"][i], "denominator": eq["denominator"][i],
+                    "std_baseline": eq["std"][i], "adj_upper": eq["adj_upper"][i],
+                    "adj_lower": eq["adj_lower"][i],
+                    "reason": d.get("reason", ""), "action": d.get("action", ""),
+                })
+        if not rows:
+            return False, "目前沒有重大設備子表資料可以上傳"
+        sb.table("enb_equipment").delete().neq("id", -1).execute()
+        batch = 200
+        for i in range(0, len(rows), batch):
+            sb.table("enb_equipment").insert(rows[i:i+batch]).execute()
+        return True, f"已上傳 {len(equipment_list)} 組子表到 Supabase"
+    except Exception as e:
+        return False, f"上傳失敗：{e}"
+
+def pull_enb_equipment_from_supabase():
+    sb = get_supabase_client()
+    if not sb:
+        return None, "尚未設定 Supabase 連線資訊"
+    try:
+        resp = sb.table("enb_equipment").select("*").order("title").order("month").execute()
+        rows = resp.data or []
+        if not rows:
+            return None, "Supabase 的 enb_equipment 資料表目前是空的"
+        grouped = {}
+        for r in rows:
+            grouped.setdefault(r["title"], []).append(r)
+        equipment_list = []
+        for title, rlist in grouped.items():
+            rlist.sort(key=lambda x: x["month"])
+            equipment_list.append({
+                "title": title,
+                "numerator_label": rlist[0].get("numerator_label"),
+                "denominator_label": rlist[0].get("denominator_label"),
+                "months": [r["month"] for r in rlist],
+                "numerator": [r.get("numerator") for r in rlist],
+                "denominator": [r.get("denominator") for r in rlist],
+                "std": [r.get("std_baseline") for r in rlist],
+                "adj_upper": [r.get("adj_upper") for r in rlist],
+                "adj_lower": [r.get("adj_lower") for r in rlist],
+                "diff": {r["month"]: {"reason": r.get("reason", ""), "action": r.get("action", "")} for r in rlist},
+            })
+        return equipment_list, None
+    except Exception as e:
+        return None, f"下載失敗：{e}"
+
+# ── 版面格式設定（單一列） ──────────────────────────────────────────────────
+def push_layout_to_supabase(settings):
+    sb = get_supabase_client()
+    if not sb:
+        return False
+    try:
+        sb.table("layout_settings").upsert({"id": 1, "settings": settings}, on_conflict="id").execute()
+        return True
+    except Exception:
+        return False
+
+def pull_layout_from_supabase():
+    sb = get_supabase_client()
+    if not sb:
+        return None
+    try:
+        resp = sb.table("layout_settings").select("*").eq("id", 1).execute()
+        if resp.data:
+            return resp.data[0].get("settings")
+    except Exception:
+        pass
+    return None
+
+# ── 操作日誌 ────────────────────────────────────────────────────────────────
+def push_activity_log_entry_to_supabase(action, detail):
+    sb = get_supabase_client()
+    if not sb:
+        return
+    try:
+        sb.table("activity_log").insert({"action": action, "detail": detail}).execute()
+    except Exception:
+        pass
+
+def pull_activity_log_from_supabase(limit=500):
+    sb = get_supabase_client()
+    if not sb:
+        return None
+    try:
+        resp = (sb.table("activity_log").select("*")
+                .order("logged_at", desc=True).limit(limit).execute())
+        logs = [{"time": r.get("logged_at"), "action": r.get("action"), "detail": r.get("detail")}
+                for r in (resp.data or [])]
+        return logs[::-1]
+    except Exception:
+        return None
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 4. 持久化
 # ─────────────────────────────────────────────────────────────────────────────
 def load_json():
@@ -590,9 +953,11 @@ def save_layout(data):
             json.dump(data, f, ensure_ascii=False)
     except Exception:
         pass
+    push_layout_to_supabase(data)   # 有設定 Supabase 就順便同步；沒設定會安靜地跳過
 
 def log_activity(action, detail=""):
-    """記錄一筆操作日誌（誰／何時／做了什麼），存到本地 JSON。
+    """記錄一筆操作日誌（誰／何時／做了什麼），存到本地 JSON，並在有設定 Supabase 時
+    也順便寫一份過去，這樣重新部署後操作歷史也不會不見。
     因為系統目前是共用管理員密碼、沒有個人帳號，"操作者"暫時只能記錄為「管理員」，
     未來若改成個人帳密登入，可以在這裡換成實際使用者名稱。"""
     try:
@@ -610,6 +975,7 @@ def log_activity(action, detail=""):
             json.dump(logs, f, ensure_ascii=False)
     except Exception:
         pass
+    push_activity_log_entry_to_supabase(action, detail)   # 有設定 Supabase 就順便同步
 
 def load_activity_log():
     if os.path.exists(ACTIVITY_LOG_JSON):
@@ -618,7 +984,8 @@ def load_activity_log():
                 return json.load(f)
         except Exception:
             pass
-    return []
+    from_supabase = pull_activity_log_from_supabase()
+    return from_supabase if from_supabase else []
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3-1. 能源基線追蹤（EnB）持久化
@@ -735,7 +1102,7 @@ if "table_align" not in st.session_state:
     st.session_state["table_align"] = "center"
 # 各頁面格式設定
 if "fmt" not in st.session_state:
-    _saved_layout = load_layout()
+    _saved_layout = load_layout() or pull_layout_from_supabase()
     st.session_state["fmt"] = _saved_layout if _saved_layout else {
         # 儀表板
         "dash_kpi_size":    28,
@@ -766,13 +1133,33 @@ if "db" not in st.session_state:
     if saved:
         st.session_state["db"] = saved
     else:
-        # 雲端環境：使用已打包的內建資料（含照片）
-        builtin = get_builtin_data()
-        st.session_state["db"] = builtin if builtin else init_from_excel()
+        # 本地檔案不存在（例如剛重新部署過）：先試著從 Supabase 抓回上次的資料，
+        # 這是解決「重新部署後照片消失」問題的關鍵一步。
+        from_supabase, _err = pull_equipment_from_supabase()
+        if from_supabase:
+            st.session_state["db"] = from_supabase
+            save_json(from_supabase)   # 順便寫回本地，當作這次 session 的快取
+        else:
+            # 再退回 Excel 或內建示範資料
+            builtin = get_builtin_data()
+            st.session_state["db"] = builtin if builtin else init_from_excel()
 
 if "enb" not in st.session_state:
     saved_enb = load_enb()
-    st.session_state["enb"] = saved_enb if saved_enb else get_default_enb()
+    if saved_enb:
+        st.session_state["enb"] = saved_enb
+    else:
+        # 同樣先試著從 Supabase 抓回上次的資料
+        default_enb = get_default_enb()
+        mu, _ = pull_enb_monthly_unit_from_supabase()
+        pl, _ = pull_enb_plant_from_supabase()
+        eq, _ = pull_enb_equipment_from_supabase()
+        default_enb["monthly_unit"] = mu if mu else default_enb["monthly_unit"]
+        default_enb["plant"] = pl if pl else default_enb["plant"]
+        default_enb["equipment"] = eq if eq else default_enb["equipment"]
+        st.session_state["enb"] = default_enb
+        if mu or pl or eq:
+            save_enb(default_enb)
 st.session_state["enb"].setdefault("equipment", [])   # 舊存檔相容：沒有這個欄位就補空清單
 
 def all_calc():
@@ -928,7 +1315,7 @@ def _render_equipment_detail(r, db_idx, loop_idx):
         if rot_key2 not in st.session_state: st.session_state[rot_key2] = 0
 
         def _save_rotated(photo_key, rot_key, d_idx):
-            """從資料庫讀原圖 → 旋轉 → 轉 RGB → 存回"""
+            """從資料庫讀原圖 → 旋轉 → 壓縮 → 存回"""
             try:
                 raw_b64 = st.session_state["db"][d_idx].get(photo_key)
                 if not raw_b64:
@@ -940,7 +1327,8 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                 img_out = img_src.rotate(-angle, expand=True)
                 buf = BytesIO()
                 img_out.save(buf, format="JPEG", quality=92)
-                st.session_state["db"][d_idx][photo_key] = base64.b64encode(buf.getvalue()).decode()
+                rotated_bytes = compress_photo_bytes(buf.getvalue())
+                st.session_state["db"][d_idx][photo_key] = base64.b64encode(rotated_bytes).decode()
                 save_json(st.session_state["db"])
                 st.session_state[rot_key] = 0
                 st.success(f"✅ {photo_key}已儲存！")
@@ -1047,11 +1435,19 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                     "消耗功率(kW)":e_kw,"設備數量":e_qty,"負載率":e_load,
                     "運轉時數(hr/年)":e_hrs,"自評重大性":e_crit,"設備管理者":e_mgr,
                 })
-                if up1: st.session_state["db"][db_idx]["外觀照片"] = base64.b64encode(up1.read()).decode()
-                if up2: st.session_state["db"][db_idx]["銘牌照片"] = base64.b64encode(up2.read()).decode()
+                photo_msgs = []
+                if up1:
+                    b64, ok, ck = compress_photo_to_b64(up1)
+                    st.session_state["db"][db_idx]["外觀照片"] = b64
+                    photo_msgs.append(f"外觀照片 {ok:,.0f}KB → {ck:,.0f}KB")
+                if up2:
+                    b64, ok, ck = compress_photo_to_b64(up2)
+                    st.session_state["db"][db_idx]["銘牌照片"] = b64
+                    photo_msgs.append(f"銘牌照片 {ok:,.0f}KB → {ck:,.0f}KB")
                 save_json(st.session_state["db"])
-                log_activity("編輯設備", f"{e_name}（{e_id}）")
-                st.success("✅ 已儲存！"); st.rerun()
+                log_activity("編輯設備", f"{e_name}（{e_id}）" + (f"，已壓縮：{'；'.join(photo_msgs)}" if photo_msgs else ""))
+                st.success("✅ 已儲存！" + ("　📷 " + "、".join(photo_msgs) if photo_msgs else ""))
+                st.rerun()
             if del_ok:
                 st.session_state[f"confirm_del_{loop_idx}_{db_idx}"] = True
                 st.rerun()
@@ -1320,6 +1716,14 @@ elif "設備盤查" in menu:
                     if not in_name or not in_id:
                         st.error("設備名稱與編號為必填！")
                     else:
+                        photo1_b64, photo2_b64 = None, None
+                        photo_msgs = []
+                        if pic1:
+                            photo1_b64, ok, ck = compress_photo_to_b64(pic1)
+                            photo_msgs.append(f"外觀照片 {ok:,.0f}KB → {ck:,.0f}KB")
+                        if pic2:
+                            photo2_b64, ok, ck = compress_photo_to_b64(pic2)
+                            photo_msgs.append(f"銘牌照片 {ok:,.0f}KB → {ck:,.0f}KB")
                         new = {
                             "系統別": in_sys, "設備名稱": in_name, "設備編號": in_id,
                             "設備型式": in_type, "設備部門": in_dept, "所在棟別": in_bldg,
@@ -1327,13 +1731,13 @@ elif "設備盤查" in menu:
                             "運轉時數(hr/年)": in_hrs, "設備年份": in_yr,
                             "使用年數": datetime.now().year - int(in_yr),
                             "自評重大性": in_crit,
-                            "外觀照片": base64.b64encode(pic1.read()).decode() if pic1 else None,
-                            "銘牌照片": base64.b64encode(pic2.read()).decode() if pic2 else None,
+                            "外觀照片": photo1_b64,
+                            "銘牌照片": photo2_b64,
                         }
                         st.session_state["db"].append(new)
                         save_json(st.session_state["db"])
-                        log_activity("新增設備", f"{in_name}（{in_id}）")
-                        st.success(f"✅ 設備【{in_name}】已寫入！")
+                        log_activity("新增設備", f"{in_name}（{in_id}）" + (f"，已壓縮：{'；'.join(photo_msgs)}" if photo_msgs else ""))
+                        st.success(f"✅ 設備【{in_name}】已寫入！" + ("　📷 " + "、".join(photo_msgs) if photo_msgs else ""))
                         st.rerun()
 
     # ── 搜尋 + 重大性篩選
@@ -2169,6 +2573,188 @@ elif "Excel" in menu:
         st.markdown(f"本地存檔：`{ENB_JSON}`（{'✅ 已存在' if os.path.exists(ENB_JSON) else '⚠️ 尚未建立'}）")
         n_eq = len(st.session_state["enb"].get("equipment", []))
         st.markdown(f"目前已同步「重大設備」子表數：**{n_eq}** 組")
+
+    st.divider()
+    st.subheader("☁️ Supabase 雲端同步")
+    _sb_client = get_supabase_client()
+    if not _sb_client:
+        st.info(
+            "尚未偵測到 Supabase 連線設定。請確認 Streamlit Secrets 裡已設定 "
+            "`SUPABASE_URL` 與 `SUPABASE_SERVICE_KEY`（設定完通常幾秒內就會生效，"
+            "不需要重新部署）。"
+        )
+    else:
+        st.success("✅ 已連線到 Supabase。")
+        st.caption(
+            "「上傳」是把目前畫面上看到的資料（含照片）整批寫進 Supabase，覆蓋雲端原本的內容；"
+            "「下載」是把 Supabase 裡的資料整批抓回來，覆蓋目前畫面上的內容。"
+            "建議規則：**做完一批編輯後上傳一次**；**重新部署或懷疑本地資料被清空時下載一次**。"
+            "系統重新啟動、找不到本地存檔時，也會自動嘗試從 Supabase 下載一次。"
+        )
+        if not st.session_state["edit_mode"]:
+            st.info("請切換至「✏️ 修改模式」才能執行同步。")
+        else:
+            st.markdown("**設備盤查資料（含照片）**")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("⬆️ 上傳設備資料到 Supabase", use_container_width=True, key="sb_push_equip"):
+                    with st.spinner("上傳中，含照片可能需要一點時間…"):
+                        ok, msg = push_equipment_to_supabase(st.session_state["db"])
+                    if ok:
+                        log_activity("Supabase上傳", f"設備資料：{msg}")
+                        st.success(f"✅ {msg}")
+                    else:
+                        st.error(f"❌ {msg}")
+            with c2:
+                if st.button("⬇️ 從 Supabase 下載設備資料", use_container_width=True, key="sb_pull_equip"):
+                    with st.spinner("下載中，含照片可能需要一點時間…"):
+                        data, err = pull_equipment_from_supabase()
+                    if err:
+                        st.error(f"❌ {err}")
+                    else:
+                        st.session_state["db"] = data
+                        save_json(data)
+                        log_activity("Supabase下載", f"設備資料：共 {len(data)} 筆")
+                        st.success(f"✅ 已下載 {len(data)} 筆設備資料！")
+                        st.rerun()
+
+            st.markdown("**能源基線追蹤（單位產量耗能／整廠用電量／重大設備）**")
+            e1, e2, e3 = st.columns(3)
+            with e1:
+                if st.button("⬆️⬇️ 單位產量耗能", use_container_width=True, key="sb_unit_menu"):
+                    st.session_state["_sb_unit_action"] = True
+                if st.session_state.get("_sb_unit_action"):
+                    uc1, uc2 = st.columns(2)
+                    if uc1.button("上傳", key="sb_push_unit", use_container_width=True):
+                        ok, msg = push_enb_monthly_unit_to_supabase(st.session_state["enb"]["monthly_unit"])
+                        (st.success if ok else st.error)(msg)
+                    if uc2.button("下載", key="sb_pull_unit", use_container_width=True):
+                        data, err = pull_enb_monthly_unit_from_supabase()
+                        if err:
+                            st.error(err)
+                        else:
+                            st.session_state["enb"]["monthly_unit"] = data
+                            save_enb(st.session_state["enb"])
+                            st.success("✅ 已下載！")
+                            st.rerun()
+            with e2:
+                if st.button("⬆️⬇️ 整廠用電量", use_container_width=True, key="sb_plant_menu"):
+                    st.session_state["_sb_plant_action"] = True
+                if st.session_state.get("_sb_plant_action"):
+                    pc1, pc2 = st.columns(2)
+                    if pc1.button("上傳", key="sb_push_plant", use_container_width=True):
+                        ok, msg = push_enb_plant_to_supabase(st.session_state["enb"]["plant"])
+                        (st.success if ok else st.error)(msg)
+                    if pc2.button("下載", key="sb_pull_plant", use_container_width=True):
+                        data, err = pull_enb_plant_from_supabase()
+                        if err:
+                            st.error(err)
+                        else:
+                            st.session_state["enb"]["plant"] = data
+                            save_enb(st.session_state["enb"])
+                            st.success("✅ 已下載！")
+                            st.rerun()
+            with e3:
+                if st.button("⬆️⬇️ 重大設備", use_container_width=True, key="sb_eq_menu"):
+                    st.session_state["_sb_eq_action"] = True
+                if st.session_state.get("_sb_eq_action"):
+                    ec1, ec2 = st.columns(2)
+                    if ec1.button("上傳", key="sb_push_eq", use_container_width=True):
+                        ok, msg = push_enb_equipment_to_supabase(st.session_state["enb"]["equipment"])
+                        (st.success if ok else st.error)(msg)
+                    if ec2.button("下載", key="sb_pull_eq", use_container_width=True):
+                        data, err = pull_enb_equipment_from_supabase()
+                        if err:
+                            st.error(err)
+                        else:
+                            st.session_state["enb"]["equipment"] = data
+                            save_enb(st.session_state["enb"])
+                            st.success("✅ 已下載！")
+                            st.rerun()
+
+
+    st.error(
+        "**重要：**equipment_db.json（含所有網頁上傳的照片）只存在於目前這台伺服器的本地硬碟，"
+        "不在 GitHub repo 裡。**只要更新 app.py、重新部署，這個檔案就會被清空**，"
+        "回到 Excel 或內建示範資料的狀態。任何時候要更新程式碼之前，請先在這裡「匯出備份」，"
+        "部署完成後再回來「還原備份」，才不會遺失網頁上傳的照片與手動編輯的內容。"
+    )
+    bcol1, bcol2 = st.columns(2)
+    with bcol1:
+        st.markdown("**匯出備份**")
+        backup_bytes = json.dumps(st.session_state["db"], ensure_ascii=False, default=str).encode("utf-8")
+        n_photo = sum(1 for r in st.session_state["db"] if r.get("外觀照片") or r.get("銘牌照片"))
+        st.caption(f"目前共 {len(st.session_state['db'])} 筆設備，其中 {n_photo} 筆含照片。")
+        st.download_button(
+            "⬇️ 匯出設備資料庫備份（含照片，JSON）",
+            backup_bytes,
+            f"equipment_db_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+            "application/json",
+            use_container_width=True,
+        )
+    with bcol2:
+        st.markdown("**還原備份**")
+        if not st.session_state["edit_mode"]:
+            st.info("請切換至「✏️ 修改模式」才能還原備份。")
+        else:
+            up_backup = st.file_uploader("選擇之前匯出的備份 JSON 檔", type=["json"], key="restore_backup_uploader")
+            if up_backup is not None:
+                try:
+                    restored = json.loads(up_backup.read().decode("utf-8"))
+                    if not isinstance(restored, list):
+                        st.error("❌ 檔案格式不正確：預期是一份設備清單（JSON 陣列）。")
+                    else:
+                        r_photo = sum(1 for r in restored if isinstance(r, dict) and (r.get("外觀照片") or r.get("銘牌照片")))
+                        st.warning(f"⚠️ 偵測到備份檔含 {len(restored)} 筆設備，其中 {r_photo} 筆含照片。"
+                                   f"還原後將**覆蓋目前的 {len(st.session_state['db'])} 筆資料**，此操作無法復原。")
+                        if st.button("✅ 確認還原（覆蓋目前資料）", type="primary", use_container_width=True):
+                            st.session_state["db"] = restored
+                            save_json(st.session_state["db"])
+                            log_activity("還原設備資料庫備份", f"還原 {len(restored)} 筆設備（{r_photo} 筆含照片）")
+                            st.success("✅ 已還原！")
+                            st.rerun()
+                except Exception as e:
+                    st.error(f"❌ 無法解析備份檔：{e}")
+
+    st.divider()
+    st.subheader("🗜️ 批次壓縮既有照片")
+    st.caption(
+        f"新上傳的照片現在會自動壓縮（長邊限制 {PHOTO_MAX_DIM}px、JPEG 品質 {PHOTO_QUALITY}），"
+        "但資料庫裡舊的、還沒套用這個規則的大尺寸照片不會自動變小。點下面的按鈕可以一次全部重新壓縮。"
+    )
+    if not st.session_state["edit_mode"]:
+        st.info("請切換至「✏️ 修改模式」才能執行批次壓縮。")
+    else:
+        total_kb = sum(
+            len(base64.b64decode(rec[k])) / 1024
+            for rec in st.session_state["db"] for k in ("外觀照片", "銘牌照片") if rec.get(k)
+        )
+        n_photos = sum(1 for rec in st.session_state["db"] for k in ("外觀照片", "銘牌照片") if rec.get(k))
+        st.markdown(f"目前資料庫共 **{n_photos}** 張照片，總大小約 **{total_kb/1024:,.1f} MB**。")
+        if st.button("🗜️ 壓縮資料庫中所有照片", use_container_width=True):
+            total_before = total_after = 0.0
+            n_changed = 0
+            with st.spinner("壓縮中，請稍候…"):
+                for rec in st.session_state["db"]:
+                    for key in ("外觀照片", "銘牌照片"):
+                        b64 = rec.get(key)
+                        if not b64:
+                            continue
+                        raw = base64.b64decode(b64)
+                        before_kb = len(raw) / 1024
+                        compressed = compress_photo_bytes(raw)
+                        after_kb = len(compressed) / 1024
+                        total_before += before_kb
+                        total_after += after_kb
+                        if after_kb < before_kb * 0.95:   # 已經很小的圖就不重複處理
+                            rec[key] = base64.b64encode(compressed).decode()
+                            n_changed += 1
+                save_json(st.session_state["db"])
+            log_activity("批次壓縮照片",
+                         f"處理 {n_changed} 張，總大小 {total_before/1024:.1f}MB → {total_after/1024:.1f}MB")
+            st.success(f"✅ 完成！共重新壓縮 {n_changed} 張照片，"
+                       f"總大小從 {total_before/1024:,.1f}MB 降到 {total_after/1024:,.1f}MB。")
+            st.rerun()
 
     st.divider()
     st.subheader("📜 操作日誌")
