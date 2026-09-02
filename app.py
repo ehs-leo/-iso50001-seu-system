@@ -1756,11 +1756,18 @@ elif "設備盤查" in menu:
     seu_f = st.selectbox("重大性篩選", ["全部", "A 級重大設備", "一般設備"])
     rows  = all_calc()
 
+    # 建立一次性的索引表（O(1) 查找）。原本 get_db_idx() 每叫一次就把整個資料庫
+    # （335 筆）掃過一遍，335 台設備等於做了超過 10 萬次比對，是頁面很慢的主因之一。
+    db_index = {}
+    for i, d in enumerate(st.session_state["db"]):
+        key = (str(d.get("系統別","")), str(d.get("設備名稱","")), str(d.get("設備編號","")))
+        db_index[key] = i
+
     def get_db_idx(r):
-        return next((i for i,d in enumerate(st.session_state["db"])
-                     if str(d.get("設備名稱",""))==str(r.get("設備名稱",""))
-                     and str(d.get("設備編號",""))==str(r.get("設備編號",""))
-                     and str(d.get("系統別",""))  ==str(r.get("系統別",""))), None)
+        key = (str(r.get("系統別","")), str(r.get("設備名稱","")), str(r.get("設備編號","")))
+        return db_index.get(key)
+
+    PAGE_SIZE = 20  # 每頁最多顯示幾台設備，避免一次把上百個展開卡片（含照片）全部畫出來
 
     if kw_f:
         # ── 搜尋模式
@@ -1768,12 +1775,19 @@ elif "設備盤查" in menu:
                     if (seu_f=="全部" or (seu_f=="A 級重大設備" and r["_seu"]=="A") or (seu_f=="一般設備" and r["_seu"]!="-"))
                     and kw_f.lower() in f"{r.get('設備名稱','')} {r.get('設備編號','')} {r.get('設備部門','')}".lower()]
         st.caption(f"搜尋結果：**{len(filtered)}** 筆")
-        for li, r in enumerate(filtered):
+
+        total_pages = max(1, math.ceil(len(filtered) / PAGE_SIZE))
+        page = st.number_input("頁數", min_value=1, max_value=total_pages, value=1, step=1,
+                                key="search_page") if total_pages > 1 else 1
+        start = (page - 1) * PAGE_SIZE
+        for li, r in enumerate(filtered[start:start + PAGE_SIZE]):
             icon  = SYSTEM_ICONS.get(r.get("系統別",""), "🔧")
             a_tag = " ⭐A級" if r["_seu"]=="A" else ""
             title = f"{icon}[{r.get('系統別','')}] {r.get('設備名稱','')} ({r.get('設備編號','')})  ｜  {r['_kwh']:,.0f} kWh  評分{r['_sc']}{a_tag}"
             with st.expander(title, expanded=False):
-                _render_equipment_detail(r, get_db_idx(r), li)
+                _render_equipment_detail(r, get_db_idx(r), start + li)
+        if total_pages > 1:
+            st.caption(f"第 {page} / {total_pages} 頁")
     else:
         # ── 系統分頁模式
         sys_rows = {}
@@ -1802,25 +1816,41 @@ elif "設備盤查" in menu:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # 系統 Tabs
-        tab_names = [f"{SYSTEM_ICONS.get(s,'🔧')} {s}（{len(v)}台）" for s,v in sys_rows.items()]
-        tabs = st.tabs(tab_names)
-        for tab,(sn,sl) in zip(tabs,sys_rows.items()):
-            with tab:
-                a_list = [r for r in sl if r["_seu"]=="A"]
-                total_kwh = sum(r['_kwh'] for r in sl)
-                st.caption(f"共 **{len(sl)}** 台 ｜ A級 **{len(a_list)}** 台 ｜ 年耗電 **{total_kwh:,.0f}** kWh")
-                # A級優先顯示在最上方，其餘設備依序排列
-                sorted_sl = sorted(sl, key=lambda r: (0 if r["_seu"]=="A" else 1, -r["_kwh"]))
-                for li,r in enumerate(sorted_sl):
-                    a_tag = " ⭐A級" if r["_seu"]=="A" else ""
-                    title = f"{r.get('設備名稱','')} ({r.get('設備編號','')})  ｜  {r['_kwh']:,.0f} kWh/年  評分{r['_sc']}{a_tag}"
-                    with st.expander(title, expanded=False):
-                        _render_equipment_detail(r, get_db_idx(r), li)
-                st.divider()
-                csv_data = pd.DataFrame([{k:v for k,v in r.items() if k not in ("外觀照片","銘牌照片","_kwh","_sc","_seu")} for r in sl]).to_csv(index=False).encode("utf-8-sig")
-                st.download_button(f"⬇️ 匯出 {sn} CSV", csv_data,
-                    f"SEU_{sn}_{datetime.now().strftime('%Y%m%d')}.csv","text/csv",key=f"dl_{sn}")
+        # 系統選擇：改用 radio 取代 st.tabs()。
+        # st.tabs() 有個常被忽略的行為：不管畫面上顯示哪個分頁，「所有」分頁裡的內容
+        # 每次重新整理都會整個在背景重新執行一次（Streamlit 不會因為分頁沒被點開就跳過），
+        # 這代表切到「設備盤查」頁面時，其實是 5 個系統、335 台設備全部一次算完、全部畫出來，
+        # 這是切換頁面很慢的最主要原因。改成 radio 之後，只有被選到的那個系統才會真的被
+        # 計算與渲染，其餘系統完全不會執行，速度差異非常明顯。
+        sys_names  = list(sys_rows.keys())
+        tab_labels = [f"{SYSTEM_ICONS.get(s,'🔧')} {s}（{len(v)}台）" for s,v in sys_rows.items()]
+        sel_idx = st.radio("選擇系統", list(range(len(sys_names))),
+                            format_func=lambda i: tab_labels[i],
+                            horizontal=True, label_visibility="collapsed", key="equip_sys_radio")
+        sn, sl = sys_names[sel_idx], sys_rows[sys_names[sel_idx]]
+
+        a_list = [r for r in sl if r["_seu"]=="A"]
+        total_kwh = sum(r['_kwh'] for r in sl)
+        st.caption(f"共 **{len(sl)}** 台 ｜ A級 **{len(a_list)}** 台 ｜ 年耗電 **{total_kwh:,.0f}** kWh")
+        # A級優先顯示在最上方，其餘設備依序排列
+        sorted_sl = sorted(sl, key=lambda r: (0 if r["_seu"]=="A" else 1, -r["_kwh"]))
+
+        total_pages = max(1, math.ceil(len(sorted_sl) / PAGE_SIZE))
+        page = st.number_input(f"{sn} 頁數", min_value=1, max_value=total_pages, value=1, step=1,
+                                key=f"page_{sn}") if total_pages > 1 else 1
+        start = (page - 1) * PAGE_SIZE
+        for li,r in enumerate(sorted_sl[start:start + PAGE_SIZE]):
+            a_tag = " ⭐A級" if r["_seu"]=="A" else ""
+            title = f"{r.get('設備名稱','')} ({r.get('設備編號','')})  ｜  {r['_kwh']:,.0f} kWh/年  評分{r['_sc']}{a_tag}"
+            with st.expander(title, expanded=False):
+                _render_equipment_detail(r, get_db_idx(r), start + li)
+        if total_pages > 1:
+            st.caption(f"第 {page} / {total_pages} 頁（共 {len(sorted_sl)} 台）")
+
+        st.divider()
+        csv_data = pd.DataFrame([{k:v for k,v in r.items() if k not in ("外觀照片","銘牌照片","_kwh","_sc","_seu")} for r in sl]).to_csv(index=False).encode("utf-8-sig")
+        st.download_button(f"⬇️ 匯出 {sn} CSV", csv_data,
+            f"SEU_{sn}_{datetime.now().strftime('%Y%m%d')}.csv","text/csv",key=f"dl_{sn}")
 
 
 
