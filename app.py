@@ -1250,9 +1250,9 @@ with st.sidebar:
         "能源基線追蹤-單位產量耗能",
         "能源基線追蹤-整廠用電量",
         "能源基線追蹤-重大設備",
-        "從Excel重新載入",
     ]
     if st.session_state["logged_in"]:
+        base_menu.append("從Excel重新載入")
         base_menu.append("版面格式設定")
     menu = st.radio("", base_menu, label_visibility="collapsed")
 
@@ -2962,10 +2962,15 @@ elif "版面格式" in menu:
     st.session_state["fmt"] = fmt
     save_layout(fmt)
 
-    # ── 重設按鈕
+    # ── 儲存／重設按鈕
     st.divider()
-    col_r1, col_r2 = st.columns([1,4])
-    with col_r1:
+    col_s, col_r, col_info = st.columns([1, 1, 3])
+    with col_s:
+        if st.button("💾 儲存設定", type="primary", use_container_width=True):
+            save_layout(fmt)
+            log_activity("儲存版面設定", "")
+            st.success("✅ 已儲存！")
+    with col_r:
         if st.button("🔄 恢復全部預設值", type="secondary", use_container_width=True):
             default_fmt = {
                 "dash_kpi_size": 28, "dash_kpi_align": "center",
@@ -2980,11 +2985,12 @@ elif "版面格式" in menu:
             }
             st.session_state["fmt"] = default_fmt
             save_layout(default_fmt)
+            log_activity("恢復版面預設值", "")
             st.success("✅ 已恢復預設值！")
             st.rerun()
-    with col_r2:
+    with col_info:
         st.markdown("""
 <div style='background:#f0fdf4;padding:10px 14px;border-radius:8px;
             border-left:4px solid #22c55e;font-size:13px;margin-top:4px'>
-  💡 設定已自動存檔（layout_settings.json），下次啟動系統會自動套用上次的設定。
+  💡 拖動滑桿當下就會自動存檔；「儲存設定」按鈕是額外提供明確的存檔確認，兩者效果相同。
 </div>""", unsafe_allow_html=True)
