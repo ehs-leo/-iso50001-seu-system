@@ -1529,7 +1529,7 @@ if "儀表板" in menu:
         col.markdown(
             f'<div class="kpi" style="text-align:center;font-family:{_ff}">' +
             f'<div class="kpi-v" style="color:{color};font-size:{_fs}px">{val}</div>' +
-            f'<div class="kpi-l">{lbl}</div></div>',
+            f'<div class="kpi-l" style="font-size:{max(10,int(_fs*0.4))}px">{lbl}</div></div>',
             unsafe_allow_html=True
         )
     st.markdown("<div style='margin:8px 0'></div>", unsafe_allow_html=True)
@@ -1545,7 +1545,7 @@ if "儀表板" in menu:
         col.markdown(
             f'<div class="kpi" style="text-align:center;font-family:{_ff}">' +
             f'<div class="kpi-v" style="color:{color};font-size:{_fs}px">{val}</div>' +
-            f'<div class="kpi-l">{lbl}</div></div>',
+            f'<div class="kpi-l" style="font-size:{max(10,int(_fs*0.4))}px">{lbl}</div></div>',
             unsafe_allow_html=True
         )
     st.markdown("<br>", unsafe_allow_html=True)
@@ -1707,14 +1707,15 @@ if "儀表板" in menu:
         df_energy_show["耗能占比(%)"] = df_energy_show["耗能占比(%)"].apply(lambda v: f"{v:.2f}%")
         centered_table(df_energy_show, context="dash")
         _dhsz = st.session_state.get("fmt", {}).get("dash_title_size", 28)
+        _dhlsz = max(10, int(_dhsz * 0.4))
         st.markdown(f"""
         <div style='background:#f0fdf4;border-left:4px solid #22c55e;
                     padding:14px 16px;border-radius:6px;margin-top:12px'>
-          <div style='font-size:12px;color:#64748b;margin-bottom:4px'>全廠實際總耗能量</div>
+          <div style='font-size:{_dhlsz}px;color:#64748b;margin-bottom:4px'>全廠實際總耗能量</div>
           <div style='font-size:{_dhsz}px;font-weight:800;color:#166534'>
-            1,941,070.608 <span style='font-size:14px;font-weight:400'>kWh/公秉</span>
+            1,941,070.608 <span style='font-size:{_dhlsz}px;font-weight:400'>kWh/公秉</span>
           </div>
-          <div style='font-size:12px;color:#64748b;margin-top:8px'>
+          <div style='font-size:{_dhlsz}px;color:#64748b;margin-top:8px'>
             外購電力占全廠能源 <strong style='color:#166534'>98.48%</strong>，
             為最主要能源來源
           </div>
@@ -3120,3 +3121,14 @@ elif "版面格式" in menu:
             border-left:4px solid #22c55e;font-size:13px;margin-top:4px'>
   💡 拖動滑桿當下就會自動存檔；「儲存設定」按鈕是額外提供明確的存檔確認，兩者效果相同。
 </div>""", unsafe_allow_html=True)
+
+    st.divider()
+    with st.expander("🔍 除錯用：目前實際生效的設定值（如果調整滑桿沒有效果，把這裡展開後截圖給開發人員）"):
+        st.caption(
+            "這裡顯示的是系統目前實際記憶體中使用的完整設定值。"
+            "如果你剛剛調整過某個滑桿、上面的數字卻沒有跟著變，代表設定沒有正確寫入，是真的問題；"
+            "如果這裡的數字是對的，但畫面上看起來沒變，通常代表瀏覽器頁面需要重新整理，"
+            "或者 GitHub 上傳的還不是最新版 app.py。"
+        )
+        st.json(st.session_state.get("fmt", {}))
+        st.caption(f"版面設定存檔（layout_settings.json）是否存在：{os.path.exists(LAYOUT_JSON)}")
