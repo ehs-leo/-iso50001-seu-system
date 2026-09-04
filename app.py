@@ -1013,6 +1013,21 @@ def load_enb():
 def save_enb(data):
     with open(ENB_JSON, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, default=str)
+    # 跟 save_layout()／log_activity() 一樣，有設定 Supabase 就順便同步一份。
+    # 這裡原本漏掉這一步：使用者在網頁表單手動編輯 EnB 資料按「儲存」後，
+    # 只會存進本機的 enb_data.json，並不會自動同步到 Supabase；
+    # 如果之後重新部署，這些手動編輯的內容就會遺失（要等下次手動點同步按鈕才找得回來，
+    # 但那個按鈕是從 Excel 讀取，不是讀回你剛剛手動編輯的內容）。加上這幾行之後，
+    # 只要手動編輯後按儲存，就會跟等版面設定一樣自動備份到 Supabase，不用另外記得點同步。
+    try:
+        if data.get("monthly_unit"):
+            push_enb_monthly_unit_to_supabase(data["monthly_unit"])
+        if data.get("plant"):
+            push_enb_plant_to_supabase(data["plant"])
+        if data.get("equipment"):
+            push_enb_equipment_to_supabase(data["equipment"])
+    except Exception:
+        pass
 
 def get_default_enb():
     """兩張能源基線追蹤表的預設示範資料（可於修改模式覆蓋）"""
@@ -1122,9 +1137,9 @@ if "fmt" not in st.session_state:
         "dash_table_align": "center",
         "dash_chart_title_size": 16,
         # 設備盤查
-        "equip_text_size":  14,
+        "equip_table_size":  14,
         "equip_title_size": 14,
-        "equip_align":      "center",
+        "equip_table_align":      "center",
         # 評分標準
         "score_table_size": 14,
         "score_table_align":"center",
@@ -1136,6 +1151,10 @@ if "fmt" not in st.session_state:
         "load_chart_title_size": 16,
         "load_table_size":  14,
         "load_table_align": "center",
+        # 能源基線追蹤（單位產量耗能／整廠用電量／重大設備）
+        "enb_table_size": 14,
+        "enb_table_align": "center",
+        "enb_chart_title_size": 16,
         # 全域字型
         "font_family": "Noto Sans TC",
     }
@@ -1303,20 +1322,23 @@ def _render_equipment_detail(r, db_idx, loop_idx):
     col_info, col_photo = st.columns([1, 2.5])
     with col_info:
         load_pct = f"{float(r.get('負載率',0))*100:.0f}%" if r.get('負載率') else "—"
-        st.markdown(f"""
-| 欄位 | 資料 |
-|------|------|
-| 部門 | {r.get('設備部門','—')} |
-| 棟別/樓層 | {r.get('所在棟別','—')} / {r.get('所在樓層','—')} |
-| 型式說明 | {r.get('設備型式','—')} |
-| 數量 | {r.get('設備數量','—')} 台 |
-| 負載率 | {load_pct} |
-| 設備年份 | {r.get('設備年份','—')} |
-| 管理者 | {r.get('設備管理者','—')} |
-| 外包商 | {r.get('外包商承攬商','—')} |
-| **年耗電量** | **{r['_kwh']:,.0f} kWh** |
-| **SEU 鑑別** | **{'⭐ A 級' if r["_seu"]=='A' else '一般設備'}** |
-""")
+        info_df = pd.DataFrame({
+            "欄位": ["部門", "棟別/樓層", "型式說明", "數量", "負載率", "設備年份",
+                    "管理者", "外包商", "年耗電量", "SEU 鑑別"],
+            "資料": [
+                r.get('設備部門','—'),
+                f"{r.get('所在棟別','—')} / {r.get('所在樓層','—')}",
+                r.get('設備型式','—'),
+                f"{r.get('設備數量','—')} 台",
+                load_pct,
+                r.get('設備年份','—'),
+                r.get('設備管理者','—'),
+                r.get('外包商承攬商','—'),
+                f"{r['_kwh']:,.0f} kWh",
+                '⭐ A 級' if r["_seu"]=='A' else '一般設備',
+            ],
+        })
+        centered_table(info_df, context="equip")
     with col_photo:
         st.markdown("**📷 設備影像**")
 
@@ -1574,7 +1596,7 @@ if "儀表板" in menu:
                 height=400,
             )
             st.plotly_chart(fig_pie, use_container_width=True)
-            st.markdown("<p style='text-align:center;font-size:16px;font-weight:700;color:#1a3a5c;'>全廠區用電數據</p>", unsafe_allow_html=True)
+            st.markdown(f"<p style='text-align:center;font-size:{st.session_state.get('fmt',{}).get('dash_chart_title_size', 16)}px;font-weight:700;color:#1a3a5c;'>全廠區用電數據</p>", unsafe_allow_html=True)
         else:
             st.info("無耗電量資料，無法顯示圓餅圖。")
 
@@ -1589,7 +1611,8 @@ if "儀表板" in menu:
                 width=0.5,
             ))
             fig_bar.update_layout(
-                title=dict(text="各系統年耗電量 (kWh)", x=0.5, font=dict(size=15)),
+                title=dict(text="各系統年耗電量 (kWh)", x=0.5,
+                           font=dict(size=st.session_state.get("fmt",{}).get("dash_chart_title_size", 15))),
                 height=380,
                 margin=dict(t=50, b=60, l=60, r=20),
                 plot_bgcolor="white", paper_bgcolor="white",
@@ -1623,7 +1646,7 @@ if "儀表板" in menu:
             "年耗電(kWh)": f"{r['_kwh']:,.0f}",
             "重大性評分":  r["_sc"],
             "管理者":       r.get("設備管理者", ""),
-        } for r in a_rows]))
+        } for r in a_rows]), context="dash")
 
     # ── 各項能源耗能占比
     st.divider()
@@ -1670,7 +1693,7 @@ if "儀表板" in menu:
             height=400,
         )
         st.plotly_chart(fig_energy, use_container_width=True)
-        st.markdown("<p style='text-align:center;font-size:16px;font-weight:700;color:#1a3a5c;'>各項能源耗能占比</p>", unsafe_allow_html=True)
+        st.markdown(f"<p style='text-align:center;font-size:{st.session_state.get('fmt',{}).get('dash_chart_title_size', 16)}px;font-weight:700;color:#1a3a5c;'>各項能源耗能占比</p>", unsafe_allow_html=True)
 
     with e_col2:
         st.markdown("##### 各項能源耗能數據")
@@ -1699,6 +1722,16 @@ if "儀表板" in menu:
 # ── 頁面二：設備盤查與照片管理
 # ─────────────────────────────────────────────────────────────────────────────
 elif "設備盤查" in menu:
+
+    # 「設備標題欄字體大小」設定：Streamlit 沒有提供官方參數可以直接調整 st.expander()
+    # 標題文字的字體大小，這裡用 CSS 選擇 data-testid（比內部 class 名稱穩定，
+    # 不會因為 Streamlit 版本更新就失效）局部覆蓋，只在這個頁面生效。
+    _etsz = st.session_state.get("fmt", {}).get("equip_title_size", 14)
+    st.markdown(f"""
+    <style>
+    div[data-testid="stExpander"] summary p {{ font-size: {_etsz}px; }}
+    </style>
+    """, unsafe_allow_html=True)
 
     # 新增設備表單（修改模式）
     if st.session_state["edit_mode"]:
@@ -2152,7 +2185,7 @@ elif "能源換算" in menu:
             height=400,
         )
         st.plotly_chart(fig_ghg, use_container_width=True)
-        st.markdown("<p style='text-align:center;font-size:16px;font-weight:700;color:#1a3a5c;'>溫室氣體排放來源分布</p>", unsafe_allow_html=True)
+        st.markdown(f"<p style='text-align:center;font-size:{st.session_state.get('fmt',{}).get('energy_chart_title_size', 16)}px;font-weight:700;color:#1a3a5c;'>溫室氣體排放來源分布</p>", unsafe_allow_html=True)
 
         st.info("""
 **排放係數來源：**
@@ -2197,7 +2230,8 @@ elif "負載" in menu:
         fill="tonexty", fillcolor="rgba(37,99,168,.06)"
     ))
     fig.update_layout(
-        title="廠區 24 小時尖離峰電力負載分佈",
+        title=dict(text="廠區 24 小時尖離峰電力負載分佈",
+                   font=dict(size=st.session_state.get("fmt",{}).get("load_chart_title_size", 16))),
         xaxis=dict(title="時間（時）", tickmode="linear", tick0=1, dtick=1),
         yaxis_title="電力負載 (kW)",
         height=420,
@@ -2251,13 +2285,13 @@ elif "單位產量耗能" in menu:
                             value=float(enb_u["production"][i] or 0), key=f"eu_prod_{m}"))
                         new_std.append(st.number_input(
                             "能源標準基線(kWh/噸)", min_value=0.0,
-                            value=float(enb_u["std"][i]), key=f"eu_std_{m}"))
+                            value=float(enb_u["std"][i] or 0), key=f"eu_std_{m}"))
                         new_up.append(st.number_input(
                             "基線調整上限(kWh/噸)", min_value=0.0,
-                            value=float(enb_u["adj_upper"][i]), key=f"eu_up_{m}"))
+                            value=float(enb_u["adj_upper"][i] or 0), key=f"eu_up_{m}"))
                         new_low.append(st.number_input(
                             "基線調整下限(kWh/噸)", min_value=0.0,
-                            value=float(enb_u["adj_lower"][i]), key=f"eu_low_{m}"))
+                            value=float(enb_u["adj_lower"][i] or 0), key=f"eu_low_{m}"))
                         new_note.append(st.text_input(
                             "備註", value=enb_u["note"][i], key=f"eu_note_{m}"))
                         st.divider()
@@ -2281,9 +2315,9 @@ elif "單位產量耗能" in menu:
 
     exceed_flags = []
     for i in range(12):
-        v = intensity[i]
+        v, up, low = intensity[i], enb_u["adj_upper"][i], enb_u["adj_lower"][i]
         exceed_flags.append(
-            v is not None and (v > enb_u["adj_upper"][i] or v < enb_u["adj_lower"][i])
+            v is not None and up is not None and low is not None and (v > up or v < low)
         )
 
     k1, k2, k3 = st.columns(3)
@@ -2301,8 +2335,9 @@ elif "單位產量耗能" in menu:
                                 mode="lines", line=dict(color="#ef4444", width=2)))
     fig_u.add_trace(go.Scatter(x=MONTH_LABELS, y=enb_u["adj_lower"], name="基線調整下限",
                                 mode="lines", line=dict(color="#ef4444", width=2)))
-    fig_u.update_layout(title="每月單位產量耗能", height=420,
-                         plot_bgcolor="white", paper_bgcolor="white", hovermode="x unified")
+    fig_u.update_layout(title=dict(text="每月單位產量耗能", x=0.5,
+                         font=dict(size=st.session_state.get("fmt",{}).get("enb_chart_title_size", 16))),
+                         height=420, plot_bgcolor="white", paper_bgcolor="white", hovermode="x unified")
     st.plotly_chart(fig_u, use_container_width=True)
 
     # ── 資料表 ──────────────────────────────────────────────
@@ -2312,12 +2347,12 @@ elif "單位產量耗能" in menu:
         "用電量(kWh)": [f"{v:,.0f}" if v else "—" for v in enb_u["kwh"]],
         "產量(噸)": [f"{v:,.2f}" if v else "—" for v in enb_u["production"]],
         "單位能耗(kWh/噸)": [f"{v:,.2f}" if v is not None else "—" for v in intensity],
-        "能源標準基線": enb_u["std"],
-        "基線調整上限": enb_u["adj_upper"],
-        "基線調整下限": enb_u["adj_lower"],
+        "能源標準基線": [f"{v:,.1f}" if v is not None else "—" for v in enb_u["std"]],
+        "基線調整上限": [f"{v:,.1f}" if v is not None else "—" for v in enb_u["adj_upper"]],
+        "基線調整下限": [f"{v:,.1f}" if v is not None else "—" for v in enb_u["adj_lower"]],
         "備註": enb_u["note"],
     })
-    centered_table(df_u, context="energy")
+    centered_table(df_u, context="enb")
 
     # ── 差異分析（逐月） ────────────────────────────────────
     st.divider()
@@ -2367,13 +2402,13 @@ elif "整廠用電量" in menu:
                             value=float(enb_p["actual"][i] or 0), key=f"pl_act_{m}"))
                         new_base.append(st.number_input(
                             "上年度基線(kWh)", min_value=0.0,
-                            value=float(enb_p["baseline_prev"][i]), key=f"pl_base_{m}"))
+                            value=float(enb_p["baseline_prev"][i] or 0), key=f"pl_base_{m}"))
                         new_up.append(st.number_input(
                             "基線調整上限(kWh)", min_value=0.0,
-                            value=float(enb_p["adj_upper"][i]), key=f"pl_up_{m}"))
+                            value=float(enb_p["adj_upper"][i] or 0), key=f"pl_up_{m}"))
                         new_low.append(st.number_input(
                             "基線調整下限(kWh)", min_value=0.0,
-                            value=float(enb_p["adj_lower"][i]), key=f"pl_low_{m}"))
+                            value=float(enb_p["adj_lower"][i] or 0), key=f"pl_low_{m}"))
                         st.divider()
                 if st.form_submit_button("💾 儲存整廠用電量設定", use_container_width=True):
                     enb_p["actual"], enb_p["baseline_prev"] = new_actual, new_base
@@ -2386,12 +2421,12 @@ elif "整廠用電量" in menu:
     # ── 計算差值與超標判斷 ──────────────────────────────────
     diff, exceed_flags = [], []
     for i in range(12):
-        a = enb_p["actual"][i]
-        if a is None:
+        a, up, low = enb_p["actual"][i], enb_p["adj_upper"][i], enb_p["adj_lower"][i]
+        if a is None or up is None or low is None:
             diff.append(None); exceed_flags.append(False)
         else:
-            diff.append(round(a - enb_p["adj_upper"][i], 1))
-            exceed_flags.append(a > enb_p["adj_upper"][i] or a < enb_p["adj_lower"][i])
+            diff.append(round(a - up, 1))
+            exceed_flags.append(a > up or a < low)
 
     valid_actual = [v for v in enb_p["actual"] if v is not None]
     avg_actual = round(sum(valid_actual) / len(valid_actual), 0) if valid_actual else 0
@@ -2411,8 +2446,9 @@ elif "整廠用電量" in menu:
                                 mode="lines", line=dict(color="#ef4444", width=2)))
     fig_p.add_trace(go.Scatter(x=MONTH_LABELS, y=enb_p["adj_lower"], name="基線調整下限",
                                 mode="lines", line=dict(color="#ef4444", width=2)))
-    fig_p.update_layout(title="整廠用電量", height=420,
-                         plot_bgcolor="white", paper_bgcolor="white", hovermode="x unified")
+    fig_p.update_layout(title=dict(text="整廠用電量", x=0.5,
+                         font=dict(size=st.session_state.get("fmt",{}).get("enb_chart_title_size", 16))),
+                         height=420, plot_bgcolor="white", paper_bgcolor="white", hovermode="x unified")
     st.plotly_chart(fig_p, use_container_width=True)
 
     # ── 資料表 ──────────────────────────────────────────────
@@ -2420,12 +2456,12 @@ elif "整廠用電量" in menu:
     df_p = pd.DataFrame({
         "月份": MONTH_LABELS,
         "本年度整廠電量(kWh)": [f"{v:,.0f}" if v is not None else "—" for v in enb_p["actual"]],
-        "能源標準基線-上年度(kWh)": [f"{v:,.0f}" for v in enb_p["baseline_prev"]],
-        "基線調整上限(kWh)": [f"{v:,.1f}" for v in enb_p["adj_upper"]],
-        "基線調整下限(kWh)": [f"{v:,.1f}" for v in enb_p["adj_lower"]],
+        "能源標準基線-上年度(kWh)": [f"{v:,.0f}" if v is not None else "—" for v in enb_p["baseline_prev"]],
+        "基線調整上限(kWh)": [f"{v:,.1f}" if v is not None else "—" for v in enb_p["adj_upper"]],
+        "基線調整下限(kWh)": [f"{v:,.1f}" if v is not None else "—" for v in enb_p["adj_lower"]],
         "與調整上限差值(kWh)": [f"{v:,.1f}" if v is not None else "—" for v in diff],
     })
-    centered_table(df_p, context="energy")
+    centered_table(df_p, context="enb")
 
     # ── 差異分析（逐月） ────────────────────────────────────
     st.divider()
@@ -2500,8 +2536,9 @@ elif "重大設備" in menu:
                                             mode="lines", line=dict(color="#ef4444", width=2)))
                 fig_e.add_trace(go.Scatter(x=month_labels, y=eq["adj_lower"], name="基線調整下限",
                                             mode="lines", line=dict(color="#ef4444", width=2)))
-                fig_e.update_layout(title=eq["title"], height=380,
-                                     plot_bgcolor="white", paper_bgcolor="white", hovermode="x unified")
+                fig_e.update_layout(title=dict(text=eq["title"], x=0.5,
+                                     font=dict(size=st.session_state.get("fmt",{}).get("enb_chart_title_size", 16))),
+                                     height=380, plot_bgcolor="white", paper_bgcolor="white", hovermode="x unified")
                 st.plotly_chart(fig_e, use_container_width=True)
 
                 df_e = pd.DataFrame({
@@ -2513,7 +2550,7 @@ elif "重大設備" in menu:
                     "基線調整上限": [f"{v:,.2f}" if v is not None else "—" for v in eq["adj_upper"]],
                     "基線調整下限": [f"{v:,.2f}" if v is not None else "—" for v in eq["adj_lower"]],
                 })
-                centered_table(df_e, context="energy")
+                centered_table(df_e, context="enb")
 
                 diff = eq.get("diff", {})
                 if diff:
@@ -2862,8 +2899,8 @@ elif "版面格式" in menu:
 </div>""", unsafe_allow_html=True)
 
     # ── 各頁面設定 tabs
-    t1, t2, t3, t4, t5 = st.tabs([
-        "📊 儀表板", "🗂️ 設備盤查", "📐 評分標準", "⚡ 能源換算", "📈 負載分析"
+    t1, t2, t3, t4, t5, t6 = st.tabs([
+        "📊 儀表板", "🗂️ 設備盤查", "📐 評分標準", "⚡ 能源換算", "📈 負載分析", "🔋 能源基線追蹤"
     ])
 
     with t1:
@@ -2879,7 +2916,7 @@ elif "版面格式" in menu:
         with c2:
             st.markdown("**表格**")
             fmt["dash_table_size"] = st.slider(
-                "表格字體大小", 10, 24, fmt.get("dash_table_size", 14), 1, key="dts")
+                "表格字體大小", 10, 36, fmt.get("dash_table_size", 14), 1, key="dts")
             fmt["dash_table_align"] = "center" if st.radio(
                 "表格對齊", ["置中","靠左"], index=0 if fmt.get("dash_table_align","center")=="center" else 1,
                 horizontal=True, key="dta") == "置中" else "left"
@@ -2902,22 +2939,22 @@ elif "版面格式" in menu:
         st.markdown("#### 設備盤查頁面")
         c1, c2 = st.columns(2)
         with c1:
-            fmt["equip_text_size"] = st.slider(
-                "設備資料字體大小", 10, 24, fmt.get("equip_text_size", 14), 1, key="ets")
+            fmt["equip_table_size"] = st.slider(
+                "設備資料字體大小", 10, 36, fmt.get("equip_table_size", 14), 1, key="ets")
         with c2:
-            fmt["equip_align"] = "center" if st.radio(
+            fmt["equip_table_align"] = "center" if st.radio(
                 "設備資料對齊", ["置中","靠左"],
-                index=0 if fmt.get("equip_align","center")=="center" else 1,
+                index=0 if fmt.get("equip_table_align","center")=="center" else 1,
                 horizontal=True, key="ea") == "置中" else "left"
         fmt["equip_title_size"] = st.slider(
-            "設備標題欄字體大小", 10, 24, fmt.get("equip_title_size", 14), 1, key="etits")
+            "設備標題欄字體大小", 10, 36, fmt.get("equip_title_size", 14), 1, key="etits")
 
     with t3:
         st.markdown("#### 評分標準頁面")
         c1, c2 = st.columns(2)
         with c1:
             fmt["score_table_size"] = st.slider(
-                "表格字體大小", 10, 24, fmt.get("score_table_size", 14), 1, key="sts")
+                "表格字體大小", 10, 36, fmt.get("score_table_size", 14), 1, key="sts")
         with c2:
             fmt["score_table_align"] = "center" if st.radio(
                 "表格對齊", ["置中","靠左"],
@@ -2936,7 +2973,7 @@ elif "版面格式" in menu:
         c1, c2 = st.columns(2)
         with c1:
             fmt["energy_table_size"] = st.slider(
-                "表格字體大小", 10, 24, fmt.get("energy_table_size", 14), 1, key="ents")
+                "表格字體大小", 10, 36, fmt.get("energy_table_size", 14), 1, key="ents")
             fmt["energy_chart_title_size"] = st.slider(
                 "圖表標題大小", 10, 28, fmt.get("energy_chart_title_size", 16), 1, key="ects")
         with c2:
@@ -2952,12 +2989,27 @@ elif "版面格式" in menu:
             fmt["load_chart_title_size"] = st.slider(
                 "圖表標題大小", 10, 28, fmt.get("load_chart_title_size", 16), 1, key="lcts")
             fmt["load_table_size"] = st.slider(
-                "表格字體大小", 10, 24, fmt.get("load_table_size", 14), 1, key="lts")
+                "表格字體大小", 10, 36, fmt.get("load_table_size", 14), 1, key="lts")
         with c2:
             fmt["load_table_align"] = "center" if st.radio(
                 "表格對齊", ["置中","靠左"],
                 index=0 if fmt.get("load_table_align","center")=="center" else 1,
                 horizontal=True, key="lta") == "置中" else "left"
+
+    with t6:
+        st.markdown("#### 能源基線追蹤頁面")
+        st.caption("套用到：能源基線追蹤-單位產量耗能／整廠用電量／重大設備 這三個頁面")
+        c1, c2 = st.columns(2)
+        with c1:
+            fmt["enb_chart_title_size"] = st.slider(
+                "圖表標題大小", 10, 28, fmt.get("enb_chart_title_size", 16), 1, key="enbcts")
+            fmt["enb_table_size"] = st.slider(
+                "表格字體大小", 10, 36, fmt.get("enb_table_size", 14), 1, key="enbts")
+        with c2:
+            fmt["enb_table_align"] = "center" if st.radio(
+                "表格對齊", ["置中","靠左"],
+                index=0 if fmt.get("enb_table_align","center")=="center" else 1,
+                horizontal=True, key="enbta") == "置中" else "left"
 
     st.session_state["fmt"] = fmt
     save_layout(fmt)
@@ -2976,11 +3028,12 @@ elif "版面格式" in menu:
                 "dash_kpi_size": 28, "dash_kpi_align": "center",
                 "dash_table_size": 14, "dash_table_align": "center",
                 "dash_chart_title_size": 16,
-                "equip_text_size": 14, "equip_title_size": 14, "equip_align": "center",
+                "equip_table_size": 14, "equip_title_size": 14, "equip_table_align": "center",
                 "score_table_size": 14, "score_table_align": "center",
                 "energy_table_size": 14, "energy_table_align": "center",
                 "energy_chart_title_size": 16,
                 "load_chart_title_size": 16, "load_table_size": 14, "load_table_align": "center",
+                "enb_table_size": 14, "enb_table_align": "center", "enb_chart_title_size": 16,
                 "font_family": "Noto Sans TC",
             }
             st.session_state["fmt"] = default_fmt
