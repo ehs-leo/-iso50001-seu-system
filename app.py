@@ -1130,33 +1130,34 @@ if "table_align" not in st.session_state:
 if "fmt" not in st.session_state:
     _saved_layout = load_layout() or pull_layout_from_supabase()
     st.session_state["fmt"] = _saved_layout if _saved_layout else {
-        # 儀表板
-        "dash_kpi_size":    28,
-        "dash_kpi_align":   "center",
+        # 儀表板：標題(KPI數字/提示框數字/圖表標題) / 圖片字體(圖例/座標軸/數據標籤) / 表格
+        "dash_title_size":  28,
+        "dash_chart_font_size": 13,
         "dash_table_size":  14,
         "dash_table_align": "center",
-        "dash_chart_title_size": 16,
-        "dash_highlight_size": 26,
-        # 設備盤查
-        "equip_table_size":  14,
+        # 設備盤查：標題(展開卡標題/摘要卡片數字/設備明細數字) / 表格（無圖表）
         "equip_title_size": 14,
+        "equip_table_size":  14,
         "equip_table_align":      "center",
-        "equip_card_size": 32,
-        # 評分標準
+        # 評分標準：標題(章節標題) / 表格（無圖表）
+        "score_title_size": 18,
         "score_table_size": 14,
         "score_table_align":"center",
-        # 能源換算
+        # 能源換算：標題(KPI數字/圖表標題) / 圖片字體 / 表格
+        "energy_title_size": 16,
+        "energy_chart_font_size": 13,
         "energy_table_size": 14,
         "energy_table_align":"center",
-        "energy_chart_title_size": 16,
-        # 負載分析
-        "load_chart_title_size": 16,
+        # 負載分析：標題(KPI數字/圖表標題) / 圖片字體 / 表格
+        "load_title_size": 16,
+        "load_chart_font_size": 13,
         "load_table_size":  14,
         "load_table_align": "center",
-        # 能源基線追蹤（單位產量耗能／整廠用電量／重大設備）
+        # 能源基線追蹤（單位產量耗能／整廠用電量／重大設備）：標題(KPI數字/圖表標題) / 圖片字體 / 表格
+        "enb_title_size": 16,
+        "enb_chart_font_size": 13,
         "enb_table_size": 14,
         "enb_table_align": "center",
-        "enb_chart_title_size": 16,
         # 全域字型
         "font_family": "Noto Sans TC",
     }
@@ -1523,11 +1524,10 @@ if "儀表板" in menu:
         (k2, str(eui),          "EUI 能源強度 (度/㎡·年)", "#2563a8"),
         (k3, str(len(rows)),    "已盤查設備總數（台）",    "#00c896"),
     ]:
-        _fs = st.session_state.get("fmt",{}).get("dash_kpi_size", 28)
-        _al = st.session_state.get("fmt",{}).get("dash_kpi_align","center")
+        _fs = st.session_state.get("fmt",{}).get("dash_title_size", 28)
         _ff = st.session_state.get("fmt",{}).get("font_family","Noto Sans TC")
         col.markdown(
-            f'<div class="kpi" style="text-align:{_al};font-family:{_ff}">' +
+            f'<div class="kpi" style="text-align:center;font-family:{_ff}">' +
             f'<div class="kpi-v" style="color:{color};font-size:{_fs}px">{val}</div>' +
             f'<div class="kpi-l">{lbl}</div></div>',
             unsafe_allow_html=True
@@ -1540,11 +1540,10 @@ if "儀表板" in menu:
         (k5, f"{cov}%",   "盤查耗電覆蓋率（估算）", "#8b5cf6"),
         (k6, f"{FLOOR_AREA:,.0f} ㎡", "廠區樓地板面積",    "#64748b"),
     ]:
-        _fs = st.session_state.get("fmt",{}).get("dash_kpi_size", 28)
-        _al = st.session_state.get("fmt",{}).get("dash_kpi_align","center")
+        _fs = st.session_state.get("fmt",{}).get("dash_title_size", 28)
         _ff = st.session_state.get("fmt",{}).get("font_family","Noto Sans TC")
         col.markdown(
-            f'<div class="kpi" style="text-align:{_al};font-family:{_ff}">' +
+            f'<div class="kpi" style="text-align:center;font-family:{_ff}">' +
             f'<div class="kpi-v" style="color:{color};font-size:{_fs}px">{val}</div>' +
             f'<div class="kpi-l">{lbl}</div></div>',
             unsafe_allow_html=True
@@ -1585,6 +1584,7 @@ if "儀表板" in menu:
             fig_pie.update_traces(
                 textinfo="percent",
                 textposition="inside",
+                textfont=dict(size=st.session_state.get('fmt',{}).get('dash_chart_font_size', 13)),
                 hovertemplate="<b>%{label}</b><br>%{value:,.0f} kWh<br>%{percent}<extra></extra>"
             )
             fig_pie.update_layout(
@@ -1592,35 +1592,37 @@ if "儀表板" in menu:
                     orientation="h",
                     yanchor="top", y=-0.05,
                     xanchor="center", x=0.5,
-                    font=dict(size=12)
+                    font=dict(size=st.session_state.get('fmt',{}).get('dash_chart_font_size', 13))
                 ),
                 margin=dict(t=20, b=60, l=20, r=20),
                 height=400,
             )
             st.plotly_chart(fig_pie, use_container_width=True)
-            st.markdown(f"<p style='text-align:center;font-size:{st.session_state.get('fmt',{}).get('dash_chart_title_size', 16)}px;font-weight:700;color:#1a3a5c;'>全廠區用電數據</p>", unsafe_allow_html=True)
+            st.markdown(f"<p style='text-align:center;font-size:{st.session_state.get('fmt',{}).get('dash_title_size', 28)}px;font-weight:700;color:#1a3a5c;'>全廠區用電數據</p>", unsafe_allow_html=True)
         else:
             st.info("無耗電量資料，無法顯示圓餅圖。")
 
     with ch2:
         if len(df_sys) > 0:
+            _dcf = st.session_state.get('fmt',{}).get('dash_chart_font_size', 13)
             fig_bar = go.Figure(go.Bar(
                 x=df_sys["系統別"],
                 y=df_sys["耗電量(kWh/年)"],
                 text=df_sys["耗電量(kWh/年)"].apply(lambda v: f"{v:,.0f}"),
                 textposition="outside",
+                textfont=dict(size=_dcf),
                 marker_color=["#1a3a5c","#2563a8","#00c896","#f59e0b","#8b5cf6"],
                 width=0.5,
             ))
             fig_bar.update_layout(
                 title=dict(text="各系統年耗電量 (kWh)", x=0.5,
-                           font=dict(size=st.session_state.get("fmt",{}).get("dash_chart_title_size", 15))),
+                           font=dict(size=st.session_state.get("fmt",{}).get("dash_title_size", 28))),
                 height=380,
                 margin=dict(t=50, b=60, l=60, r=20),
                 plot_bgcolor="white", paper_bgcolor="white",
                 yaxis_tickformat=",",
-                xaxis=dict(tickfont=dict(size=13)),
-                yaxis=dict(tickfont=dict(size=12)),
+                xaxis=dict(tickfont=dict(size=_dcf)),
+                yaxis=dict(tickfont=dict(size=_dcf)),
                 bargap=0.3,
             )
             st.plotly_chart(fig_bar, use_container_width=True)
@@ -1682,6 +1684,7 @@ if "儀表板" in menu:
             textinfo="percent",
             textposition="inside",
             insidetextorientation="radial",
+            textfont=dict(size=st.session_state.get('fmt',{}).get('dash_chart_font_size', 13)),
             hovertemplate="<b>%{label}</b><br>占比：%{value:.2f}%<extra></extra>",
         ))
         fig_energy.update_layout(
@@ -1689,13 +1692,13 @@ if "儀表板" in menu:
                 orientation="h",
                 yanchor="top", y=-0.05,
                 xanchor="center", x=0.5,
-                font=dict(size=13)
+                font=dict(size=st.session_state.get('fmt',{}).get('dash_chart_font_size', 13))
             ),
             margin=dict(t=20, b=60, l=20, r=20),
             height=400,
         )
         st.plotly_chart(fig_energy, use_container_width=True)
-        st.markdown(f"<p style='text-align:center;font-size:{st.session_state.get('fmt',{}).get('dash_chart_title_size', 16)}px;font-weight:700;color:#1a3a5c;'>各項能源耗能占比</p>", unsafe_allow_html=True)
+        st.markdown(f"<p style='text-align:center;font-size:{st.session_state.get('fmt',{}).get('dash_title_size', 28)}px;font-weight:700;color:#1a3a5c;'>各項能源耗能占比</p>", unsafe_allow_html=True)
 
     with e_col2:
         st.markdown("##### 各項能源耗能數據")
@@ -1703,7 +1706,7 @@ if "儀表板" in menu:
         df_energy_show["能耗評估(kWh/公秉)"] = df_energy_show["能耗評估(kWh/公秉)"].apply(lambda v: f"{v:,.2f}")
         df_energy_show["耗能占比(%)"] = df_energy_show["耗能占比(%)"].apply(lambda v: f"{v:.2f}%")
         centered_table(df_energy_show, context="dash")
-        _dhsz = st.session_state.get("fmt", {}).get("dash_highlight_size", 26)
+        _dhsz = st.session_state.get("fmt", {}).get("dash_title_size", 28)
         st.markdown(f"""
         <div style='background:#f0fdf4;border-left:4px solid #22c55e;
                     padding:14px 16px;border-radius:6px;margin-top:12px'>
@@ -1723,13 +1726,15 @@ if "儀表板" in menu:
 # ─────────────────────────────────────────────────────────────────────────────
 elif "設備盤查" in menu:
 
-    # 「設備標題欄字體大小」設定：Streamlit 沒有提供官方參數可以直接調整 st.expander()
-    # 標題文字的字體大小，這裡用 CSS 選擇 data-testid（比內部 class 名稱穩定，
-    # 不會因為 Streamlit 版本更新就失效）局部覆蓋，只在這個頁面生效。
+    # 「標題」設定同時控制：展開卡標題文字、摘要卡片數字、設備明細的 4 個數字方塊（st.metric）。
+    # Streamlit 沒有提供官方參數可以直接調整 st.expander() 或 st.metric() 的字體大小，
+    # 這裡用 CSS 選擇 data-testid（比內部 class 名稱穩定，不會因為 Streamlit 版本更新就失效）
+    # 局部覆蓋，只在這個頁面生效。
     _etsz = st.session_state.get("fmt", {}).get("equip_title_size", 14)
     st.markdown(f"""
     <style>
     div[data-testid="stExpander"] summary p {{ font-size: {_etsz}px; }}
+    div[data-testid="stMetricValue"] {{ font-size: {_etsz}px; }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -1832,7 +1837,7 @@ elif "設備盤查" in menu:
 
         # 摘要卡片
         card_cols = st.columns(len(sys_rows))
-        _ecsz = st.session_state.get("fmt", {}).get("equip_card_size", 32)
+        _ecsz = st.session_state.get("fmt", {}).get("equip_title_size", 14)
         for i,(sn,sl) in enumerate(sys_rows.items()):
             a_cnt = sum(1 for r in sl if r["_seu"]=="A")
             icon = SYSTEM_ICONS.get(sn,"🔧")
@@ -1898,6 +1903,16 @@ elif "設備盤查" in menu:
 # ─────────────────────────────────────────────────────────────────────────────
 elif "評分標準" in menu:
     st.subheader("📐 ISO 50001 重大能源使用設備評分標準")
+
+    # 「標題」設定控制這個頁面裡的 #### / ##### 章節標題文字大小（Streamlit markdown
+    # 標題本身沒有字體大小參數，用 CSS 覆蓋內建的 h4/h5 標籤，只在這個頁面生效）。
+    _stsz = st.session_state.get("fmt", {}).get("score_title_size", 18)
+    st.markdown(f"""
+    <style>
+    div[data-testid="stMarkdownContainer"] h4 {{ font-size: {_stsz}px; }}
+    div[data-testid="stMarkdownContainer"] h5 {{ font-size: {_stsz * 0.85:.0f}px; }}
+    </style>
+    """, unsafe_allow_html=True)
 
     tab1, tab2 = st.tabs(["重大能源使用鑑別（A級）", "優先改善項目鑑別（I級）"])
 
@@ -2021,6 +2036,14 @@ elif "評分標準" in menu:
 # ─────────────────────────────────────────────────────────────────────────────
 elif "能源換算" in menu:
     st.subheader("⚡ 能源換算與溫室氣體排放數據")
+
+    # 「標題」設定同時控制：圖表標題文字、頁面裡數字方塊（st.metric）的字體大小。
+    _entsz = st.session_state.get("fmt", {}).get("energy_title_size", 16)
+    st.markdown(f"""
+    <style>
+    div[data-testid="stMetricValue"] {{ font-size: {_entsz}px; }}
+    </style>
+    """, unsafe_allow_html=True)
 
     tab1, tab2, tab3, tab4 = st.tabs([
         "熱值表", "換算表（能源使用）", "油當量表", "溫室氣體排放數據"
@@ -2173,6 +2196,7 @@ elif "能源換算" in menu:
             textinfo="percent",
             textposition="inside",
             insidetextorientation="radial",
+            textfont=dict(size=st.session_state.get('fmt',{}).get('energy_chart_font_size', 13)),
             hovertemplate="<b>%{label}</b><br>%{value:.4f} 公噸CO₂e<br>%{percent}<extra></extra>",
         ))
         fig_ghg.update_layout(
@@ -2180,13 +2204,13 @@ elif "能源換算" in menu:
                 orientation="h",
                 yanchor="top", y=-0.05,
                 xanchor="center", x=0.5,
-                font=dict(size=12)
+                font=dict(size=st.session_state.get('fmt',{}).get('energy_chart_font_size', 13))
             ),
             margin=dict(t=20, b=60, l=20, r=20),
             height=400,
         )
         st.plotly_chart(fig_ghg, use_container_width=True)
-        st.markdown(f"<p style='text-align:center;font-size:{st.session_state.get('fmt',{}).get('energy_chart_title_size', 16)}px;font-weight:700;color:#1a3a5c;'>溫室氣體排放來源分布</p>", unsafe_allow_html=True)
+        st.markdown(f"<p style='text-align:center;font-size:{st.session_state.get('fmt',{}).get('energy_title_size', 16)}px;font-weight:700;color:#1a3a5c;'>溫室氣體排放來源分布</p>", unsafe_allow_html=True)
 
         st.info("""
 **排放係數來源：**
@@ -2202,6 +2226,14 @@ elif "負載" in menu:
     st.subheader("📈 全廠 24 小時電力負載曲線")
     st.info("統計區間：2024 年 6/11 – 10/18（共 95 天尖峰期）")
 
+    # 「標題」設定同時控制：圖表標題文字、下方數字方塊（st.metric）的字體大小。
+    _ldtsz = st.session_state.get("fmt", {}).get("load_title_size", 16)
+    st.markdown(f"""
+    <style>
+    div[data-testid="stMetricValue"] {{ font-size: {_ldtsz}px; }}
+    </style>
+    """, unsafe_allow_html=True)
+
     df_load = pd.DataFrame({
         "時間(時)": list(range(1, 25)),
         "最高用電(kW)": [135,130,127,126,125,128,194,278,362,384,388,399,
@@ -2213,6 +2245,7 @@ elif "負載" in menu:
         (df_load["最高用電(kW)"] + df_load["最低用電(kW)"]) / 2
     ).round(1)
 
+    _ldcf = st.session_state.get("fmt", {}).get("load_chart_font_size", 13)
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=df_load["時間(時)"], y=df_load["最高用電(kW)"],
@@ -2232,9 +2265,11 @@ elif "負載" in menu:
     ))
     fig.update_layout(
         title=dict(text="廠區 24 小時尖離峰電力負載分佈",
-                   font=dict(size=st.session_state.get("fmt",{}).get("load_chart_title_size", 16))),
-        xaxis=dict(title="時間（時）", tickmode="linear", tick0=1, dtick=1),
-        yaxis_title="電力負載 (kW)",
+                   font=dict(size=_ldtsz)),
+        xaxis=dict(title="時間（時）", tickmode="linear", tick0=1, dtick=1,
+                   tickfont=dict(size=_ldcf), title_font=dict(size=_ldcf)),
+        yaxis=dict(title="電力負載 (kW)", tickfont=dict(size=_ldcf), title_font=dict(size=_ldcf)),
+        legend=dict(font=dict(size=_ldcf)),
         height=420,
         plot_bgcolor="white", paper_bgcolor="white",
         hovermode="x unified"
@@ -2264,6 +2299,11 @@ elif "負載" in menu:
 elif "單位產量耗能" in menu:
     st.subheader("⚡ 能源基線追蹤－每月單位產量耗能")
     st.caption("依 ISO 50001 能源基線（EnB）與能源績效指標（EnPI）追蹤生產能耗強度")
+    st.markdown(f"""
+    <style>
+    div[data-testid="stMetricValue"] {{ font-size: {st.session_state.get("fmt", {}).get("enb_title_size", 16)}px; }}
+    </style>
+    """, unsafe_allow_html=True)
 
     MONTHS = list(range(1, 13))
     MONTH_LABELS = [f"{m}月" for m in MONTHS]
@@ -2328,6 +2368,7 @@ elif "單位產量耗能" in menu:
 
     # ── 折線圖 ──────────────────────────────────────────────
     fig_u = go.Figure()
+    _enbcf = st.session_state.get("fmt", {}).get("enb_chart_font_size", 13)
     fig_u.add_trace(go.Scatter(x=MONTH_LABELS, y=intensity, name="單位能耗(kWh/噸)",
                                 mode="lines+markers", line=dict(color="#22c55e", width=3)))
     fig_u.add_trace(go.Scatter(x=MONTH_LABELS, y=enb_u["std"], name="能源標準基線",
@@ -2337,7 +2378,9 @@ elif "單位產量耗能" in menu:
     fig_u.add_trace(go.Scatter(x=MONTH_LABELS, y=enb_u["adj_lower"], name="基線調整下限",
                                 mode="lines", line=dict(color="#ef4444", width=2)))
     fig_u.update_layout(title=dict(text="每月單位產量耗能", x=0.5,
-                         font=dict(size=st.session_state.get("fmt",{}).get("enb_chart_title_size", 16))),
+                         font=dict(size=st.session_state.get("fmt",{}).get("enb_title_size", 16))),
+                         xaxis=dict(tickfont=dict(size=_enbcf)), yaxis=dict(tickfont=dict(size=_enbcf)),
+                         legend=dict(font=dict(size=_enbcf)),
                          height=420, plot_bgcolor="white", paper_bgcolor="white", hovermode="x unified")
     st.plotly_chart(fig_u, use_container_width=True)
 
@@ -2382,6 +2425,11 @@ elif "單位產量耗能" in menu:
 elif "整廠用電量" in menu:
     st.subheader("⚡ 能源基線追蹤－整廠用電量")
     st.caption("比較本年度整廠用電量與上年度同期基線及基線調整範圍")
+    st.markdown(f"""
+    <style>
+    div[data-testid="stMetricValue"] {{ font-size: {st.session_state.get("fmt", {}).get("enb_title_size", 16)}px; }}
+    </style>
+    """, unsafe_allow_html=True)
 
     MONTHS = list(range(1, 13))
     MONTH_LABELS = [f"{m}月" for m in MONTHS]
@@ -2439,6 +2487,7 @@ elif "整廠用電量" in menu:
 
     # ── 折線圖 ──────────────────────────────────────────────
     fig_p = go.Figure()
+    _enbcf2 = st.session_state.get("fmt", {}).get("enb_chart_font_size", 13)
     fig_p.add_trace(go.Scatter(x=MONTH_LABELS, y=enb_p["actual"], name="本年度整廠電量(kWh)",
                                 mode="lines+markers", line=dict(color="#22c55e", width=3)))
     fig_p.add_trace(go.Scatter(x=MONTH_LABELS, y=enb_p["baseline_prev"], name="能源標準基線-上年度",
@@ -2448,7 +2497,9 @@ elif "整廠用電量" in menu:
     fig_p.add_trace(go.Scatter(x=MONTH_LABELS, y=enb_p["adj_lower"], name="基線調整下限",
                                 mode="lines", line=dict(color="#ef4444", width=2)))
     fig_p.update_layout(title=dict(text="整廠用電量", x=0.5,
-                         font=dict(size=st.session_state.get("fmt",{}).get("enb_chart_title_size", 16))),
+                         font=dict(size=st.session_state.get("fmt",{}).get("enb_title_size", 16))),
+                         xaxis=dict(tickfont=dict(size=_enbcf2)), yaxis=dict(tickfont=dict(size=_enbcf2)),
+                         legend=dict(font=dict(size=_enbcf2)),
                          height=420, plot_bgcolor="white", paper_bgcolor="white", hovermode="x unified")
     st.plotly_chart(fig_p, use_container_width=True)
 
@@ -2495,6 +2546,11 @@ elif "重大設備" in menu:
         "此資料只能透過 Excel 同步，不提供頁面手動編輯——"
         "請切換到「✏️ 修改模式」，至「從Excel重新載入」頁面點擊「同步『重大設備』表」。"
     )
+    st.markdown(f"""
+    <style>
+    div[data-testid="stMetricValue"] {{ font-size: {st.session_state.get("fmt", {}).get("enb_title_size", 16)}px; }}
+    </style>
+    """, unsafe_allow_html=True)
 
     equipment_list = st.session_state["enb"].get("equipment", [])
 
@@ -2527,6 +2583,7 @@ elif "重大設備" in menu:
                 k3.metric("已填報月份數", f"{len(valid_ratio)} / {len(months)}")
 
                 fig_e = go.Figure()
+                _enbcf3 = st.session_state.get("fmt", {}).get("enb_chart_font_size", 13)
                 fig_e.add_trace(go.Scatter(
                     x=month_labels, y=ratio,
                     name=f"{eq['numerator_label']} / {eq['denominator_label']}",
@@ -2538,7 +2595,9 @@ elif "重大設備" in menu:
                 fig_e.add_trace(go.Scatter(x=month_labels, y=eq["adj_lower"], name="基線調整下限",
                                             mode="lines", line=dict(color="#ef4444", width=2)))
                 fig_e.update_layout(title=dict(text=eq["title"], x=0.5,
-                                     font=dict(size=st.session_state.get("fmt",{}).get("enb_chart_title_size", 16))),
+                                     font=dict(size=st.session_state.get("fmt",{}).get("enb_title_size", 16))),
+                                     xaxis=dict(tickfont=dict(size=_enbcf3)), yaxis=dict(tickfont=dict(size=_enbcf3)),
+                                     legend=dict(font=dict(size=_enbcf3)),
                                      height=380, plot_bgcolor="white", paper_bgcolor="white", hovermode="x unified")
                 st.plotly_chart(fig_e, use_container_width=True)
 
@@ -2906,27 +2965,20 @@ elif "版面格式" in menu:
 
     with t1:
         st.markdown("#### 儀表板頁面")
-        c1, c2 = st.columns(2)
+        st.caption("標題：KPI數字／提示框數字／圖表標題　｜　圖片字體：圖例、座標軸、數據標籤　｜　表格：表格字體")
+        c1, c2, c3 = st.columns(3)
         with c1:
-            st.markdown("**KPI 卡片**")
-            fmt["dash_kpi_size"] = st.slider(
-                "KPI 數字大小", 16, 48, fmt.get("dash_kpi_size", 28), 1, key="dks")
-            fmt["dash_kpi_align"] = "center" if st.radio(
-                "KPI 對齊", ["置中","靠左"], index=0 if fmt.get("dash_kpi_align","center")=="center" else 1,
-                horizontal=True, key="dka") == "置中" else "left"
+            fmt["dash_title_size"] = st.slider(
+                "標題", 10, 48, fmt.get("dash_title_size", 28), 1, key="dts_title")
         with c2:
-            st.markdown("**表格**")
+            fmt["dash_chart_font_size"] = st.slider(
+                "圖片字體", 8, 24, fmt.get("dash_chart_font_size", 13), 1, key="dts_chart")
+        with c3:
             fmt["dash_table_size"] = st.slider(
-                "表格字體大小", 10, 36, fmt.get("dash_table_size", 14), 1, key="dts")
-            fmt["dash_table_align"] = "center" if st.radio(
-                "表格對齊", ["置中","靠左"], index=0 if fmt.get("dash_table_align","center")=="center" else 1,
-                horizontal=True, key="dta") == "置中" else "left"
-        st.markdown("**圖表**")
-        fmt["dash_chart_title_size"] = st.slider(
-            "圖表標題大小", 10, 28, fmt.get("dash_chart_title_size", 16), 1, key="dcts")
-        st.markdown("**「全廠實際總耗能量」提示框**")
-        fmt["dash_highlight_size"] = st.slider(
-            "提示框數字大小", 16, 48, fmt.get("dash_highlight_size", 26), 1, key="dhs")
+                "表格字體", 10, 36, fmt.get("dash_table_size", 14), 1, key="dts")
+        fmt["dash_table_align"] = "center" if st.radio(
+            "表格對齊", ["置中","靠左"], index=0 if fmt.get("dash_table_align","center")=="center" else 1,
+            horizontal=True, key="dta") == "置中" else "left"
 
         # Preview
         st.markdown("---")
@@ -2941,32 +2993,33 @@ elif "版面格式" in menu:
 
     with t2:
         st.markdown("#### 設備盤查頁面")
+        st.caption("標題：展開卡標題／摘要卡片數字／設備明細數字　｜　表格：設備資料表格字體（此頁無圖表）")
         c1, c2 = st.columns(2)
         with c1:
-            fmt["equip_table_size"] = st.slider(
-                "設備資料字體大小", 10, 36, fmt.get("equip_table_size", 14), 1, key="ets")
+            fmt["equip_title_size"] = st.slider(
+                "標題", 10, 36, fmt.get("equip_title_size", 14), 1, key="ets_title")
         with c2:
-            fmt["equip_table_align"] = "center" if st.radio(
-                "設備資料對齊", ["置中","靠左"],
-                index=0 if fmt.get("equip_table_align","center")=="center" else 1,
-                horizontal=True, key="ea") == "置中" else "left"
-        fmt["equip_title_size"] = st.slider(
-            "設備標題欄字體大小", 10, 36, fmt.get("equip_title_size", 14), 1, key="etits")
-        st.markdown("**各系統耗能摘要卡片**")
-        fmt["equip_card_size"] = st.slider(
-            "卡片數字大小", 16, 48, fmt.get("equip_card_size", 32), 1, key="ecs")
+            fmt["equip_table_size"] = st.slider(
+                "表格字體", 10, 36, fmt.get("equip_table_size", 14), 1, key="ets")
+        fmt["equip_table_align"] = "center" if st.radio(
+            "表格對齊", ["置中","靠左"],
+            index=0 if fmt.get("equip_table_align","center")=="center" else 1,
+            horizontal=True, key="ea") == "置中" else "left"
 
     with t3:
         st.markdown("#### 評分標準頁面")
+        st.caption("標題：章節標題文字　｜　表格：評分表字體（此頁無圖表）")
         c1, c2 = st.columns(2)
         with c1:
-            fmt["score_table_size"] = st.slider(
-                "表格字體大小", 10, 36, fmt.get("score_table_size", 14), 1, key="sts")
+            fmt["score_title_size"] = st.slider(
+                "標題", 10, 36, fmt.get("score_title_size", 18), 1, key="sts_title")
         with c2:
-            fmt["score_table_align"] = "center" if st.radio(
-                "表格對齊", ["置中","靠左"],
-                index=0 if fmt.get("score_table_align","center")=="center" else 1,
-                horizontal=True, key="sta") == "置中" else "left"
+            fmt["score_table_size"] = st.slider(
+                "表格字體", 10, 36, fmt.get("score_table_size", 14), 1, key="sts")
+        fmt["score_table_align"] = "center" if st.radio(
+            "表格對齊", ["置中","靠左"],
+            index=0 if fmt.get("score_table_align","center")=="center" else 1,
+            horizontal=True, key="sta") == "置中" else "left"
         st.markdown("---")
         st.markdown("**預覽效果**")
         preview_score = pd.DataFrame({
@@ -2977,46 +3030,58 @@ elif "版面格式" in menu:
 
     with t4:
         st.markdown("#### 能源換算頁面")
-        c1, c2 = st.columns(2)
+        st.caption("標題：KPI數字／圖表標題　｜　圖片字體：圖例、數據標籤　｜　表格：換算表字體")
+        c1, c2, c3 = st.columns(3)
         with c1:
-            fmt["energy_table_size"] = st.slider(
-                "表格字體大小", 10, 36, fmt.get("energy_table_size", 14), 1, key="ents")
-            fmt["energy_chart_title_size"] = st.slider(
-                "圖表標題大小", 10, 28, fmt.get("energy_chart_title_size", 16), 1, key="ects")
+            fmt["energy_title_size"] = st.slider(
+                "標題", 10, 36, fmt.get("energy_title_size", 16), 1, key="ents_title")
         with c2:
-            fmt["energy_table_align"] = "center" if st.radio(
-                "表格對齊", ["置中","靠左"],
-                index=0 if fmt.get("energy_table_align","center")=="center" else 1,
-                horizontal=True, key="enta") == "置中" else "left"
+            fmt["energy_chart_font_size"] = st.slider(
+                "圖片字體", 8, 24, fmt.get("energy_chart_font_size", 13), 1, key="ents_chart")
+        with c3:
+            fmt["energy_table_size"] = st.slider(
+                "表格字體", 10, 36, fmt.get("energy_table_size", 14), 1, key="ents")
+        fmt["energy_table_align"] = "center" if st.radio(
+            "表格對齊", ["置中","靠左"],
+            index=0 if fmt.get("energy_table_align","center")=="center" else 1,
+            horizontal=True, key="enta") == "置中" else "left"
 
     with t5:
         st.markdown("#### 每日負載分析頁面")
-        c1, c2 = st.columns(2)
+        st.caption("標題：KPI數字／圖表標題　｜　圖片字體：圖例、座標軸　｜　表格：負載曲線表字體")
+        c1, c2, c3 = st.columns(3)
         with c1:
-            fmt["load_chart_title_size"] = st.slider(
-                "圖表標題大小", 10, 28, fmt.get("load_chart_title_size", 16), 1, key="lcts")
-            fmt["load_table_size"] = st.slider(
-                "表格字體大小", 10, 36, fmt.get("load_table_size", 14), 1, key="lts")
+            fmt["load_title_size"] = st.slider(
+                "標題", 10, 36, fmt.get("load_title_size", 16), 1, key="lts_title")
         with c2:
-            fmt["load_table_align"] = "center" if st.radio(
-                "表格對齊", ["置中","靠左"],
-                index=0 if fmt.get("load_table_align","center")=="center" else 1,
-                horizontal=True, key="lta") == "置中" else "left"
+            fmt["load_chart_font_size"] = st.slider(
+                "圖片字體", 8, 24, fmt.get("load_chart_font_size", 13), 1, key="lts_chart")
+        with c3:
+            fmt["load_table_size"] = st.slider(
+                "表格字體", 10, 36, fmt.get("load_table_size", 14), 1, key="lts")
+        fmt["load_table_align"] = "center" if st.radio(
+            "表格對齊", ["置中","靠左"],
+            index=0 if fmt.get("load_table_align","center")=="center" else 1,
+            horizontal=True, key="lta") == "置中" else "left"
 
     with t6:
         st.markdown("#### 能源基線追蹤頁面")
-        st.caption("套用到：能源基線追蹤-單位產量耗能／整廠用電量／重大設備 這三個頁面")
-        c1, c2 = st.columns(2)
+        st.caption("套用到：能源基線追蹤-單位產量耗能／整廠用電量／重大設備 這三個頁面　｜　"
+                    "標題：KPI數字／圖表標題　｜　圖片字體：圖例、座標軸　｜　表格：資料表字體")
+        c1, c2, c3 = st.columns(3)
         with c1:
-            fmt["enb_chart_title_size"] = st.slider(
-                "圖表標題大小", 10, 28, fmt.get("enb_chart_title_size", 16), 1, key="enbcts")
-            fmt["enb_table_size"] = st.slider(
-                "表格字體大小", 10, 36, fmt.get("enb_table_size", 14), 1, key="enbts")
+            fmt["enb_title_size"] = st.slider(
+                "標題", 10, 36, fmt.get("enb_title_size", 16), 1, key="enbts_title")
         with c2:
-            fmt["enb_table_align"] = "center" if st.radio(
-                "表格對齊", ["置中","靠左"],
-                index=0 if fmt.get("enb_table_align","center")=="center" else 1,
-                horizontal=True, key="enbta") == "置中" else "left"
+            fmt["enb_chart_font_size"] = st.slider(
+                "圖片字體", 8, 24, fmt.get("enb_chart_font_size", 13), 1, key="enbts_chart")
+        with c3:
+            fmt["enb_table_size"] = st.slider(
+                "表格字體", 10, 36, fmt.get("enb_table_size", 14), 1, key="enbts")
+        fmt["enb_table_align"] = "center" if st.radio(
+            "表格對齊", ["置中","靠左"],
+            index=0 if fmt.get("enb_table_align","center")=="center" else 1,
+            horizontal=True, key="enbta") == "置中" else "left"
 
     st.session_state["fmt"] = fmt
     save_layout(fmt)
@@ -3032,16 +3097,16 @@ elif "版面格式" in menu:
     with col_r:
         if st.button("🔄 恢復全部預設值", type="secondary", use_container_width=True):
             default_fmt = {
-                "dash_kpi_size": 28, "dash_kpi_align": "center",
+                "dash_title_size": 28, "dash_chart_font_size": 13,
                 "dash_table_size": 14, "dash_table_align": "center",
-                "dash_chart_title_size": 16, "dash_highlight_size": 26,
-                "equip_table_size": 14, "equip_title_size": 14, "equip_table_align": "center",
-                "equip_card_size": 32,
-                "score_table_size": 14, "score_table_align": "center",
+                "equip_title_size": 14, "equip_table_size": 14, "equip_table_align": "center",
+                "score_title_size": 18, "score_table_size": 14, "score_table_align": "center",
+                "energy_title_size": 16, "energy_chart_font_size": 13,
                 "energy_table_size": 14, "energy_table_align": "center",
-                "energy_chart_title_size": 16,
-                "load_chart_title_size": 16, "load_table_size": 14, "load_table_align": "center",
-                "enb_table_size": 14, "enb_table_align": "center", "enb_chart_title_size": 16,
+                "load_title_size": 16, "load_chart_font_size": 13,
+                "load_table_size": 14, "load_table_align": "center",
+                "enb_title_size": 16, "enb_chart_font_size": 13,
+                "enb_table_size": 14, "enb_table_align": "center",
                 "font_family": "Noto Sans TC",
             }
             st.session_state["fmt"] = default_fmt
