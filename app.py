@@ -1836,38 +1836,47 @@ elif "設備盤查" in menu:
             s = r.get("系統別","其他")
             sys_rows.setdefault(s,[]).append(r)
 
-        # 摘要卡片
-        card_cols = st.columns(len(sys_rows))
+        # 摘要卡片：直接點卡片切換系統，取代原本卡片下方另外一排的 radio 選單。
+        # 原理：st.button 的外觀用 CSS 改造成卡片樣式（圓角、陰影、頂部色條），
+        # 目前選中的系統用 type="primary" 讓 Streamlit 原生畫出高亮外框做區分。
+        # 效能考量與原本 radio 版本相同：只有被選到的那個系統才會真的被計算與渲染，
+        # 其餘系統的設備明細完全不會執行，避免 335 台設備一次全部算完、全部畫出來。
         _ecsz = st.session_state.get("fmt", {}).get("equip_title_size", 14)
-        for i,(sn,sl) in enumerate(sys_rows.items()):
-            a_cnt = sum(1 for r in sl if r["_seu"]=="A")
-            icon = SYSTEM_ICONS.get(sn,"🔧")
-            card_cols[i].markdown(f"""
-<div style='background:#fff;border-radius:12px;padding:18px 10px;
-            box-shadow:0 1px 6px rgba(0,0,0,.10);text-align:center;
-            border-top:4px solid #2563a8;'>
-  <div style='font-size:32px;margin-bottom:6px'>{icon}</div>
-  <div style='font-size:16px;font-weight:700;color:#1a3a5c;margin-bottom:6px'>{sn}</div>
-  <div style='font-size:{_ecsz}px;font-weight:800;color:#2563a8;line-height:1'>{len(sl)}</div>
-  <div style='font-size:14px;color:#64748b;margin-bottom:6px'>台設備</div>
-  <div style='font-size:14px;color:#f59e0b;font-weight:700'>A級：{a_cnt} 台</div>
-  <div style='font-size:13px;color:#94a3b8;margin-top:4px'>{sum(r["_kwh"] for r in sl):,.0f} kWh/年</div>
-</div>""", unsafe_allow_html=True)
+        if st.session_state.get("equip_sys_selected") not in sys_rows:
+            st.session_state["equip_sys_selected"] = next(iter(sys_rows))
+
+        st.markdown(f"""
+        <style>
+        div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button {{
+            height: auto; min-height: 132px; padding: 18px 10px; border-radius: 12px;
+            border: 1px solid rgba(0,0,0,.06); border-top: 4px solid #2563a8;
+            box-shadow: 0 1px 6px rgba(0,0,0,.10); background:#fff;
+            white-space: pre-line; line-height: 1.5; font-size: {_ecsz}px;
+        }}
+        div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button[kind="primary"] {{
+            border: 2px solid #2563a8; border-top: 4px solid #2563a8; background:#eef4fb;
+        }}
+        </style>
+        """, unsafe_allow_html=True)
+
+        card_cols = st.columns(len(sys_rows))
+        for i,(sn_i,sl_i) in enumerate(sys_rows.items()):
+            a_cnt = sum(1 for r in sl_i if r["_seu"]=="A")
+            icon = SYSTEM_ICONS.get(sn_i,"🔧")
+            label = (f"{icon} **{sn_i}**\n"
+                     f"{len(sl_i)} 台設備\n"
+                     f"A級：{a_cnt} 台\n"
+                     f"{sum(r['_kwh'] for r in sl_i):,.0f} kWh/年")
+            is_sel = st.session_state["equip_sys_selected"] == sn_i
+            if card_cols[i].button(label, key=f"sys_card_{sn_i}", use_container_width=True,
+                                    type="primary" if is_sel else "secondary"):
+                st.session_state["equip_sys_selected"] = sn_i
+                st.rerun()
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # 系統選擇：改用 radio 取代 st.tabs()。
-        # st.tabs() 有個常被忽略的行為：不管畫面上顯示哪個分頁，「所有」分頁裡的內容
-        # 每次重新整理都會整個在背景重新執行一次（Streamlit 不會因為分頁沒被點開就跳過），
-        # 這代表切到「設備盤查」頁面時，其實是 5 個系統、335 台設備全部一次算完、全部畫出來，
-        # 這是切換頁面很慢的最主要原因。改成 radio 之後，只有被選到的那個系統才會真的被
-        # 計算與渲染，其餘系統完全不會執行，速度差異非常明顯。
-        sys_names  = list(sys_rows.keys())
-        tab_labels = [f"{SYSTEM_ICONS.get(s,'🔧')} {s}（{len(v)}台）" for s,v in sys_rows.items()]
-        sel_idx = st.radio("選擇系統", list(range(len(sys_names))),
-                            format_func=lambda i: tab_labels[i],
-                            horizontal=True, label_visibility="collapsed", key="equip_sys_radio")
-        sn, sl = sys_names[sel_idx], sys_rows[sys_names[sel_idx]]
+        sn = st.session_state["equip_sys_selected"]
+        sl = sys_rows[sn]
 
         a_list = [r for r in sl if r["_seu"]=="A"]
         total_kwh = sum(r['_kwh'] for r in sl)
