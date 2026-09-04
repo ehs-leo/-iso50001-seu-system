@@ -1136,10 +1136,12 @@ if "fmt" not in st.session_state:
         "dash_table_size":  14,
         "dash_table_align": "center",
         "dash_chart_title_size": 16,
+        "dash_highlight_size": 26,
         # 設備盤查
         "equip_table_size":  14,
         "equip_title_size": 14,
         "equip_table_align":      "center",
+        "equip_card_size": 32,
         # 評分標準
         "score_table_size": 14,
         "score_table_align":"center",
@@ -1697,18 +1699,16 @@ if "儀表板" in menu:
 
     with e_col2:
         st.markdown("##### 各項能源耗能數據")
-        st.markdown(f"""
-| 能源來源 | 能耗評估 (kWh/公秉) | 耗能占比 |
-|---------|-------------------|---------|
-| 汽油 | 9,339.49 | 0.48% |
-| 柴油 | 20,090.12 | 1.04% |
-| 外購電力 | 1,911,641 | 98.48% |
-""")
+        df_energy_show = df_energy.copy()
+        df_energy_show["能耗評估(kWh/公秉)"] = df_energy_show["能耗評估(kWh/公秉)"].apply(lambda v: f"{v:,.2f}")
+        df_energy_show["耗能占比(%)"] = df_energy_show["耗能占比(%)"].apply(lambda v: f"{v:.2f}%")
+        centered_table(df_energy_show, context="dash")
+        _dhsz = st.session_state.get("fmt", {}).get("dash_highlight_size", 26)
         st.markdown(f"""
         <div style='background:#f0fdf4;border-left:4px solid #22c55e;
                     padding:14px 16px;border-radius:6px;margin-top:12px'>
           <div style='font-size:12px;color:#64748b;margin-bottom:4px'>全廠實際總耗能量</div>
-          <div style='font-size:26px;font-weight:800;color:#166534'>
+          <div style='font-size:{_dhsz}px;font-weight:800;color:#166534'>
             1,941,070.608 <span style='font-size:14px;font-weight:400'>kWh/公秉</span>
           </div>
           <div style='font-size:12px;color:#64748b;margin-top:8px'>
@@ -1832,6 +1832,7 @@ elif "設備盤查" in menu:
 
         # 摘要卡片
         card_cols = st.columns(len(sys_rows))
+        _ecsz = st.session_state.get("fmt", {}).get("equip_card_size", 32)
         for i,(sn,sl) in enumerate(sys_rows.items()):
             a_cnt = sum(1 for r in sl if r["_seu"]=="A")
             icon = SYSTEM_ICONS.get(sn,"🔧")
@@ -1841,7 +1842,7 @@ elif "設備盤查" in menu:
             border-top:4px solid #2563a8;'>
   <div style='font-size:32px;margin-bottom:6px'>{icon}</div>
   <div style='font-size:16px;font-weight:700;color:#1a3a5c;margin-bottom:6px'>{sn}</div>
-  <div style='font-size:32px;font-weight:800;color:#2563a8;line-height:1'>{len(sl)}</div>
+  <div style='font-size:{_ecsz}px;font-weight:800;color:#2563a8;line-height:1'>{len(sl)}</div>
   <div style='font-size:14px;color:#64748b;margin-bottom:6px'>台設備</div>
   <div style='font-size:14px;color:#f59e0b;font-weight:700'>A級：{a_cnt} 台</div>
   <div style='font-size:13px;color:#94a3b8;margin-top:4px'>{sum(r["_kwh"] for r in sl):,.0f} kWh/年</div>
@@ -2923,6 +2924,9 @@ elif "版面格式" in menu:
         st.markdown("**圖表**")
         fmt["dash_chart_title_size"] = st.slider(
             "圖表標題大小", 10, 28, fmt.get("dash_chart_title_size", 16), 1, key="dcts")
+        st.markdown("**「全廠實際總耗能量」提示框**")
+        fmt["dash_highlight_size"] = st.slider(
+            "提示框數字大小", 16, 48, fmt.get("dash_highlight_size", 26), 1, key="dhs")
 
         # Preview
         st.markdown("---")
@@ -2948,6 +2952,9 @@ elif "版面格式" in menu:
                 horizontal=True, key="ea") == "置中" else "left"
         fmt["equip_title_size"] = st.slider(
             "設備標題欄字體大小", 10, 36, fmt.get("equip_title_size", 14), 1, key="etits")
+        st.markdown("**各系統耗能摘要卡片**")
+        fmt["equip_card_size"] = st.slider(
+            "卡片數字大小", 16, 48, fmt.get("equip_card_size", 32), 1, key="ecs")
 
     with t3:
         st.markdown("#### 評分標準頁面")
@@ -3027,8 +3034,9 @@ elif "版面格式" in menu:
             default_fmt = {
                 "dash_kpi_size": 28, "dash_kpi_align": "center",
                 "dash_table_size": 14, "dash_table_align": "center",
-                "dash_chart_title_size": 16,
+                "dash_chart_title_size": 16, "dash_highlight_size": 26,
                 "equip_table_size": 14, "equip_title_size": 14, "equip_table_align": "center",
+                "equip_card_size": 32,
                 "score_table_size": 14, "score_table_align": "center",
                 "energy_table_size": 14, "energy_table_align": "center",
                 "energy_chart_title_size": 16,
