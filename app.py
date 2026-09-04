@@ -1851,10 +1851,15 @@ elif "設備盤查" in menu:
             height: auto; min-height: 132px; padding: 18px 10px; border-radius: 12px;
             border: 1px solid rgba(0,0,0,.06); border-top: 4px solid #2563a8;
             box-shadow: 0 1px 6px rgba(0,0,0,.10); background:#fff;
-            white-space: pre-line; line-height: 1.5; font-size: {_ecsz}px;
+            white-space: pre-line; line-height: 1.6; font-size: {_ecsz}px;
+            text-align: center; display: flex; flex-direction: column; justify-content: center;
         }}
         div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button[kind="primary"] {{
             border: 2px solid #2563a8; border-top: 4px solid #2563a8; background:#eef4fb;
+        }}
+        div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button p,
+        div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button[kind="primary"] p {{
+            color: #000 !important;
         }}
         </style>
         """, unsafe_allow_html=True)
@@ -1863,9 +1868,9 @@ elif "設備盤查" in menu:
         for i,(sn_i,sl_i) in enumerate(sys_rows.items()):
             a_cnt = sum(1 for r in sl_i if r["_seu"]=="A")
             icon = SYSTEM_ICONS.get(sn_i,"🔧")
-            label = (f"{icon} **{sn_i}**\n"
-                     f"{len(sl_i)} 台設備\n"
-                     f"A級：{a_cnt} 台\n"
+            label = (f"{icon} **{sn_i}**  \n"
+                     f"{len(sl_i)} 台設備  \n"
+                     f"A級：{a_cnt} 台  \n"
                      f"{sum(r['_kwh'] for r in sl_i):,.0f} kWh/年")
             is_sel = st.session_state["equip_sys_selected"] == sn_i
             if card_cols[i].button(label, key=f"sys_card_{sn_i}", use_container_width=True,
