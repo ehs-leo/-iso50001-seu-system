@@ -1829,7 +1829,9 @@ elif "設備盤查" in menu:
             st.caption(f"第 {page} / {total_pages} 頁")
     else:
         # ── 系統分頁模式
-        sys_rows = {}
+        # 固定先建立全部 5 個系統的卡片位置（即使篩選後某系統 0 筆也保留），
+        # 避免「重大性篩選」切換時卡片數量忽多忽少、版面跟著跳動。
+        sys_rows = {s: [] for s in SYSTEM_SHEETS}
         for r in rows:
             if seu_f=="A 級重大設備" and r["_seu"]!="A": continue
             if seu_f=="一般設備" and r["_seu"]=="A": continue
