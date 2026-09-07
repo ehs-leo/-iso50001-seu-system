@@ -688,6 +688,7 @@ def push_equipment_to_supabase(records):
             code = str(rec.get("設備編號") or f"NOID_{i}").strip() or f"NOID_{i}"
             appearance_path = _sb_upload_photo(sb, rec.get("外觀照片"), f"{code}_appearance.jpg")
             nameplate_path  = _sb_upload_photo(sb, rec.get("銘牌照片"),  f"{code}_nameplate.jpg")
+            nameplate_path2 = _sb_upload_photo(sb, rec.get("銘牌照片2"), f"{code}_nameplate2.jpg")
             rows.append({
                 "system_name": rec.get("系統別"), "equipment_name": rec.get("設備名稱"),
                 "equipment_code": code, "equipment_type": rec.get("設備型式"),
@@ -699,6 +700,7 @@ def push_equipment_to_supabase(records):
                 "criticality": _sf(rec.get("自評重大性")), "manager": rec.get("設備管理者"),
                 "contractor": rec.get("外包商承攬商"), "related_vars": rec.get("相關變數"),
                 "appearance_photo_path": appearance_path, "nameplate_photo_path": nameplate_path,
+                "nameplate_photo_path2": nameplate_path2,
             })
         # 用「整批清空重寫」而非逐列比對更新，邏輯最單純可靠，335 筆規模也很快
         sb.table("equipment").delete().neq("id", -1).execute()
@@ -733,6 +735,7 @@ def pull_equipment_from_supabase():
                 "相關變數": row.get("related_vars"),
                 "外觀照片": _sb_download_photo(sb, row.get("appearance_photo_path")),
                 "銘牌照片": _sb_download_photo(sb, row.get("nameplate_photo_path")),
+                "銘牌照片2": _sb_download_photo(sb, row.get("nameplate_photo_path2")),
             })
         return records, None
     except Exception as e:
@@ -1347,8 +1350,10 @@ def _render_equipment_detail(r, db_idx, loop_idx):
 
         rot_key1 = f"rot_p1_{loop_idx}_{db_idx if db_idx is not None else 0}"
         rot_key2 = f"rot_p2_{loop_idx}_{db_idx if db_idx is not None else 0}"
+        rot_key3 = f"rot_p3_{loop_idx}_{db_idx if db_idx is not None else 0}"
         if rot_key1 not in st.session_state: st.session_state[rot_key1] = 0
         if rot_key2 not in st.session_state: st.session_state[rot_key2] = 0
+        if rot_key3 not in st.session_state: st.session_state[rot_key3] = 0
 
         def _save_rotated(photo_key, rot_key, d_idx):
             """從資料庫讀原圖 → 旋轉 → 壓縮 → 存回"""
@@ -1372,7 +1377,16 @@ def _render_equipment_detail(r, db_idx, loop_idx):
             except Exception as e:
                 st.error(f"儲存失敗：{e}")
 
-        ph1, ph2 = st.columns([1, 2])
+        # 第 2 張銘牌照片是「選填」：只有本來就有資料，或目前在修改模式下
+        # （方便隨時補傳）才會多顯示第 3 欄，平常瀏覽不會佔版面。
+        photo2b_data = r.get("銘牌照片2") or (
+            st.session_state["db"][db_idx].get("銘牌照片2") if db_idx is not None else None)
+        show_2nd_nameplate = bool(photo2b_data) or st.session_state.get("edit_mode")
+
+        if show_2nd_nameplate:
+            ph1, ph2, ph3 = st.columns([1, 2, 2])
+        else:
+            ph1, ph2 = st.columns([1, 2])
 
         with ph1:
             st.caption("📷 外觀照片（直立）")
@@ -1443,6 +1457,41 @@ def _render_equipment_detail(r, db_idx, loop_idx):
   <div style='font-size:36px'>🏷️</div>
   <div style='margin-top:8px;font-size:13px'>尚未上傳銘牌照片</div>
 </div>""", unsafe_allow_html=True)
+
+        if show_2nd_nameplate:
+            with ph3:
+                st.caption("🏷️ 銘牌照片2（第2個馬達名牌，橫式）")
+                if photo2b_data:
+                    try:
+                        img3 = Image.open(BytesIO(base64.b64decode(photo2b_data))).convert("RGB")
+                        if st.session_state[rot_key3] != 0:
+                            img3 = img3.rotate(-st.session_state[rot_key3], expand=True)
+                        st.image(img3, use_container_width=True)
+                    except Exception as e:
+                        st.warning(f"顯示失敗：{e}")
+                        img3 = None
+                    if st.session_state.get("edit_mode"):
+                        rc3a, rc3b = st.columns(2)
+                        with rc3a:
+                            if st.button("↺ 逆時針", key=f"ccw3_{loop_idx}_{db_idx}", use_container_width=True):
+                                st.session_state[rot_key3] = (st.session_state[rot_key3] - 90) % 360
+                                st.rerun()
+                        with rc3b:
+                            if st.button("↻ 順時針", key=f"cw3_{loop_idx}_{db_idx}", use_container_width=True):
+                                st.session_state[rot_key3] = (st.session_state[rot_key3] + 90) % 360
+                                st.rerun()
+                        if st.session_state[rot_key3] != 0 and db_idx is not None:
+                            if st.button("💾 儲存旋轉", key=f"sav3_{loop_idx}_{db_idx}", use_container_width=True):
+                                _save_rotated("銘牌照片2", rot_key3, db_idx)
+                else:
+                    st.markdown("""
+<div style='background:#f1f5f9;border:2px dashed #cbd5e1;border-radius:10px;
+            padding:60px 20px;text-align:center;color:#94a3b8;min-height:160px;
+            display:flex;flex-direction:column;justify-content:center'>
+  <div style='font-size:36px'>🏷️</div>
+  <div style='margin-top:8px;font-size:13px'>尚未上傳第2張銘牌照片</div>
+  <div style='margin-top:4px;font-size:12px'>（如有第2個馬達名牌可在下方修改表單新增）</div>
+</div>""", unsafe_allow_html=True)
     if st.session_state["edit_mode"] and db_idx is not None:
         st.markdown("---")
         cur = st.session_state["db"][db_idx]
@@ -1462,6 +1511,8 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                 e_mgr  = st.text_input("設備管理者", value=str(cur.get("設備管理者","") or ""))
             up1 = st.file_uploader("更新外觀照片", type=["jpg","jpeg","png"], key=f"u1_{loop_idx}_{db_idx}")
             up2 = st.file_uploader("更新銘牌照片", type=["jpg","jpeg","png"], key=f"u2_{loop_idx}_{db_idx}")
+            up2b = st.file_uploader("新增/更新銘牌照片2（選填，第2個馬達名牌）",
+                                     type=["jpg","jpeg","png"], key=f"u2b_{loop_idx}_{db_idx}")
             sv, dl = st.columns([3,1])
             with sv: save_ok = st.form_submit_button("💾 儲存變更", use_container_width=True)
             with dl: del_ok  = st.form_submit_button("🗑️ 刪除", use_container_width=True)
@@ -1480,6 +1531,10 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                     b64, ok, ck = compress_photo_to_b64(up2)
                     st.session_state["db"][db_idx]["銘牌照片"] = b64
                     photo_msgs.append(f"銘牌照片 {ok:,.0f}KB → {ck:,.0f}KB")
+                if up2b:
+                    b64, ok, ck = compress_photo_to_b64(up2b)
+                    st.session_state["db"][db_idx]["銘牌照片2"] = b64
+                    photo_msgs.append(f"銘牌照片2 {ok:,.0f}KB → {ck:,.0f}KB")
                 save_json(st.session_state["db"])
                 log_activity("編輯設備", f"{e_name}（{e_id}）" + (f"，已壓縮：{'；'.join(photo_msgs)}" if photo_msgs else ""))
                 st.success("✅ 已儲存！" + ("　📷 " + "、".join(photo_msgs) if photo_msgs else ""))
@@ -1761,12 +1816,13 @@ elif "設備盤查" in menu:
                     in_crit = st.slider("自評重大性 (1~5)", 1, 5, 3)
                 pic1 = st.file_uploader("📷 設備外觀照片", type=["jpg","jpeg","png"])
                 pic2 = st.file_uploader("🏷️ 銘牌照片",     type=["jpg","jpeg","png"])
+                pic2b = st.file_uploader("🏷️ 銘牌照片2（選填，若有第2個馬達名牌）", type=["jpg","jpeg","png"])
 
                 if st.form_submit_button("💾 提交寫入資料庫", use_container_width=True):
                     if not in_name or not in_id:
                         st.error("設備名稱與編號為必填！")
                     else:
-                        photo1_b64, photo2_b64 = None, None
+                        photo1_b64, photo2_b64, photo2b_b64 = None, None, None
                         photo_msgs = []
                         if pic1:
                             photo1_b64, ok, ck = compress_photo_to_b64(pic1)
@@ -1774,6 +1830,9 @@ elif "設備盤查" in menu:
                         if pic2:
                             photo2_b64, ok, ck = compress_photo_to_b64(pic2)
                             photo_msgs.append(f"銘牌照片 {ok:,.0f}KB → {ck:,.0f}KB")
+                        if pic2b:
+                            photo2b_b64, ok, ck = compress_photo_to_b64(pic2b)
+                            photo_msgs.append(f"銘牌照片2 {ok:,.0f}KB → {ck:,.0f}KB")
                         new = {
                             "系統別": in_sys, "設備名稱": in_name, "設備編號": in_id,
                             "設備型式": in_type, "設備部門": in_dept, "所在棟別": in_bldg,
@@ -1783,6 +1842,7 @@ elif "設備盤查" in menu:
                             "自評重大性": in_crit,
                             "外觀照片": photo1_b64,
                             "銘牌照片": photo2_b64,
+                            "銘牌照片2": photo2b_b64,
                         }
                         st.session_state["db"].append(new)
                         save_json(st.session_state["db"])
@@ -1904,7 +1964,7 @@ elif "設備盤查" in menu:
             st.caption(f"第 {page} / {total_pages} 頁（共 {len(sorted_sl)} 台）")
 
         st.divider()
-        csv_data = pd.DataFrame([{k:v for k,v in r.items() if k not in ("外觀照片","銘牌照片","_kwh","_sc","_seu")} for r in sl]).to_csv(index=False).encode("utf-8-sig")
+        csv_data = pd.DataFrame([{k:v for k,v in r.items() if k not in ("外觀照片","銘牌照片","銘牌照片2","_kwh","_sc","_seu")} for r in sl]).to_csv(index=False).encode("utf-8-sig")
         st.download_button(f"⬇️ 匯出 {sn} CSV", csv_data,
             f"SEU_{sn}_{datetime.now().strftime('%Y%m%d')}.csv","text/csv",key=f"dl_{sn}")
 
@@ -2838,7 +2898,7 @@ elif "Excel" in menu:
     with bcol1:
         st.markdown("**匯出備份**")
         backup_bytes = json.dumps(st.session_state["db"], ensure_ascii=False, default=str).encode("utf-8")
-        n_photo = sum(1 for r in st.session_state["db"] if r.get("外觀照片") or r.get("銘牌照片"))
+        n_photo = sum(1 for r in st.session_state["db"] if r.get("外觀照片") or r.get("銘牌照片") or r.get("銘牌照片2"))
         st.caption(f"目前共 {len(st.session_state['db'])} 筆設備，其中 {n_photo} 筆含照片。")
         st.download_button(
             "⬇️ 匯出設備資料庫備份（含照片，JSON）",
@@ -2859,7 +2919,7 @@ elif "Excel" in menu:
                     if not isinstance(restored, list):
                         st.error("❌ 檔案格式不正確：預期是一份設備清單（JSON 陣列）。")
                     else:
-                        r_photo = sum(1 for r in restored if isinstance(r, dict) and (r.get("外觀照片") or r.get("銘牌照片")))
+                        r_photo = sum(1 for r in restored if isinstance(r, dict) and (r.get("外觀照片") or r.get("銘牌照片") or r.get("銘牌照片2")))
                         st.warning(f"⚠️ 偵測到備份檔含 {len(restored)} 筆設備，其中 {r_photo} 筆含照片。"
                                    f"還原後將**覆蓋目前的 {len(st.session_state['db'])} 筆資料**，此操作無法復原。")
                         if st.button("✅ 確認還原（覆蓋目前資料）", type="primary", use_container_width=True):
@@ -2882,16 +2942,16 @@ elif "Excel" in menu:
     else:
         total_kb = sum(
             len(base64.b64decode(rec[k])) / 1024
-            for rec in st.session_state["db"] for k in ("外觀照片", "銘牌照片") if rec.get(k)
+            for rec in st.session_state["db"] for k in ("外觀照片", "銘牌照片", "銘牌照片2") if rec.get(k)
         )
-        n_photos = sum(1 for rec in st.session_state["db"] for k in ("外觀照片", "銘牌照片") if rec.get(k))
+        n_photos = sum(1 for rec in st.session_state["db"] for k in ("外觀照片", "銘牌照片", "銘牌照片2") if rec.get(k))
         st.markdown(f"目前資料庫共 **{n_photos}** 張照片，總大小約 **{total_kb/1024:,.1f} MB**。")
         if st.button("🗜️ 壓縮資料庫中所有照片", use_container_width=True):
             total_before = total_after = 0.0
             n_changed = 0
             with st.spinner("壓縮中，請稍候…"):
                 for rec in st.session_state["db"]:
-                    for key in ("外觀照片", "銘牌照片"):
+                    for key in ("外觀照片", "銘牌照片", "銘牌照片2"):
                         b64 = rec.get(key)
                         if not b64:
                             continue
