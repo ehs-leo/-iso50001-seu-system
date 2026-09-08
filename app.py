@@ -137,6 +137,61 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 「窄框 + 確認鍵」共用元件：方框只佔約 1/3 版面寬度，旁邊貼一個確認鍵，
+# 輸入/選擇後要按確認才會真的套用，避免每打一個字、每點一次 +/- 就整頁重跑。
+# ─────────────────────────────────────────────────────────────────────────────
+def narrow_text_with_confirm(label, state_key, key_prefix):
+    """窄版文字輸入框（搜尋用）。回傳目前「已確認」的值。"""
+    if state_key not in st.session_state:
+        st.session_state[state_key] = ""
+    col, _sp = st.columns([1, 2])
+    with col:
+        ci, cb = st.columns([4, 1])
+        with ci:
+            draft = st.text_input(label, value=st.session_state[state_key], key=f"{key_prefix}_draft")
+        with cb:
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            if st.button("確認", key=f"{key_prefix}_confirm", use_container_width=True):
+                st.session_state[state_key] = draft
+                st.rerun()
+    return st.session_state[state_key]
+
+def narrow_select_with_confirm(label, options, state_key, key_prefix):
+    """窄版下拉選單。回傳目前「已確認」的值。"""
+    if state_key not in st.session_state:
+        st.session_state[state_key] = options[0]
+    col, _sp = st.columns([1, 2])
+    with col:
+        ci, cb = st.columns([4, 1])
+        with ci:
+            idx = options.index(st.session_state[state_key]) if st.session_state[state_key] in options else 0
+            draft = st.selectbox(label, options, index=idx, key=f"{key_prefix}_draft")
+        with cb:
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            if st.button("確認", key=f"{key_prefix}_confirm", use_container_width=True):
+                st.session_state[state_key] = draft
+                st.rerun()
+    return st.session_state[state_key]
+
+def narrow_page_with_confirm(label, total_pages, state_key, key_prefix):
+    """窄版頁數輸入框。回傳目前「已確認」的頁數。"""
+    if state_key not in st.session_state:
+        st.session_state[state_key] = 1
+    st.session_state[state_key] = min(st.session_state[state_key], total_pages)
+    col, _sp = st.columns([1, 2])
+    with col:
+        ci, cb = st.columns([4, 1])
+        with ci:
+            draft = st.number_input(label, min_value=1, max_value=total_pages,
+                                     value=st.session_state[state_key], step=1, key=f"{key_prefix}_draft")
+        with cb:
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            if st.button("確認", key=f"{key_prefix}_confirm", use_container_width=True):
+                st.session_state[state_key] = draft
+                st.rerun()
+    return st.session_state[state_key]
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 1. 常數
 # ─────────────────────────────────────────────────────────────────────────────
 def _get_admin_password():
@@ -1850,9 +1905,9 @@ elif "設備盤查" in menu:
                         st.success(f"✅ 設備【{in_name}】已寫入！" + ("　📷 " + "、".join(photo_msgs) if photo_msgs else ""))
                         st.rerun()
 
-    # ── 搜尋 + 重大性篩選
-    kw_f  = st.text_input("🔍 搜尋設備名稱 / 編號 / 部門（跨系統搜尋）")
-    seu_f = st.selectbox("重大性篩選", ["全部", "A 級重大設備", "一般設備"])
+    # ── 搜尋 + 重大性篩選（窄框 + 確認鍵，輸入完按確認才套用）
+    kw_f  = narrow_text_with_confirm("🔍 搜尋設備名稱 / 編號 / 部門（跨系統搜尋）", "kw_f_val", "kw_f")
+    seu_f = narrow_select_with_confirm("重大性篩選", ["全部", "A 級重大設備", "一般設備"], "seu_f_val", "seu_f")
     rows  = all_calc()
 
     # 建立一次性的索引表（O(1) 查找）。原本 get_db_idx() 每叫一次就把整個資料庫
@@ -1876,8 +1931,7 @@ elif "設備盤查" in menu:
         st.caption(f"搜尋結果：**{len(filtered)}** 筆")
 
         total_pages = max(1, math.ceil(len(filtered) / PAGE_SIZE))
-        page = st.number_input("頁數", min_value=1, max_value=total_pages, value=1, step=1,
-                                key="search_page") if total_pages > 1 else 1
+        page = narrow_page_with_confirm("頁數", total_pages, "search_page_val", "search_page") if total_pages > 1 else 1
         start = (page - 1) * PAGE_SIZE
         for li, r in enumerate(filtered[start:start + PAGE_SIZE]):
             icon  = SYSTEM_ICONS.get(r.get("系統別",""), "🔧")
@@ -1952,8 +2006,7 @@ elif "設備盤查" in menu:
         sorted_sl = sorted(sl, key=lambda r: (0 if r["_seu"]=="A" else 1, -r["_kwh"]))
 
         total_pages = max(1, math.ceil(len(sorted_sl) / PAGE_SIZE))
-        page = st.number_input(f"{sn} 頁數", min_value=1, max_value=total_pages, value=1, step=1,
-                                key=f"page_{sn}") if total_pages > 1 else 1
+        page = narrow_page_with_confirm(f"{sn} 頁數", total_pages, f"page_{sn}_val", f"page_{sn}") if total_pages > 1 else 1
         start = (page - 1) * PAGE_SIZE
         for li,r in enumerate(sorted_sl[start:start + PAGE_SIZE]):
             a_tag = " ⭐A級" if r["_seu"]=="A" else ""
