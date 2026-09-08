@@ -183,20 +183,29 @@ def narrow_select_with_confirm(label, options, state_key, key_prefix):
     return st.session_state[state_key]
 
 def narrow_page_with_confirm(label, total_pages, state_key, key_prefix):
-    """窄版頁數輸入框。回傳目前「已確認」的頁數。"""
+    """頁碼切換：用「◀ 上一頁 / 下一頁 ▶」按鈕取代 -/+ 數字輸入框。
+    每按一次只會換一頁、只觸發一次重新整理，不需要像文字/下拉選單那樣另外
+    加確認鍵；到第一頁或最後一頁時對應的按鈕會自動變成不可點擊。"""
     if state_key not in st.session_state:
         st.session_state[state_key] = 1
-    st.session_state[state_key] = min(st.session_state[state_key], total_pages)
+    st.session_state[state_key] = min(max(1, st.session_state[state_key]), total_pages)
     col, _sp = st.columns([1, 2])
     with col:
-        ci, cb = st.columns([4, 1])
-        with ci:
-            draft = st.number_input(label, min_value=1, max_value=total_pages,
-                                     value=st.session_state[state_key], step=1, key=f"{key_prefix}_draft")
-        with cb:
-            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-            if st.button("確認", key=f"{key_prefix}_confirm", use_container_width=True):
-                st.session_state[state_key] = draft
+        st.caption(label)
+        cp, ct, cn = st.columns([1, 1, 1])
+        with cp:
+            if st.button("◀ 上一頁", key=f"{key_prefix}_prev", use_container_width=True,
+                         disabled=st.session_state[state_key] <= 1):
+                st.session_state[state_key] -= 1
+                st.rerun()
+        with ct:
+            st.markdown(
+                f"<div style='text-align:center;padding-top:8px;font-weight:600;color:#000'>"
+                f"{st.session_state[state_key]} / {total_pages}</div>", unsafe_allow_html=True)
+        with cn:
+            if st.button("下一頁 ▶", key=f"{key_prefix}_next", use_container_width=True,
+                         disabled=st.session_state[state_key] >= total_pages):
+                st.session_state[state_key] += 1
                 st.rerun()
     return st.session_state[state_key]
 
