@@ -2003,6 +2003,7 @@ elif "設備盤查" in menu:
         .st-key-sys_summary_cards div[data-testid="stButton"] button p,
         .st-key-sys_summary_cards div[data-testid="stButton"] button[kind="primary"] p {{
             color: #000 !important;
+            font-size: {_ecsz}px !important;
         }}
         </style>
         """, unsafe_allow_html=True)
