@@ -1932,27 +1932,6 @@ elif "設備盤查" in menu:
 
     PAGE_SIZE = 20  # 每頁最多顯示幾台設備，避免一次把上百個展開卡片（含照片）全部畫出來
 
-    def _lazy_row(row_key, title, render_fn):
-        """用「按鈕展開」取代 st.expander。
-        st.expander 不管有沒有被使用者點開，裡面的內容（含照片解碼）每次重新整理
-        都還是會整段被執行、畫出來，只是用 CSS 摺起來藏起來而已——這就是為什麼
-        清單看起來是一列一列慢慢跑出來（其實是在背景一張張解壓縮照片）。
-        改用按鈕手動控制顯示，沒展開的列不會執行 render_fn，清單本身幾乎瞬間全部
-        跑出來，點開某一列才會真的去解碼那一列的照片。"""
-        if row_key not in st.session_state:
-            st.session_state[row_key] = False
-        with st.container(border=True):
-            bcol, tcol = st.columns([1, 11])
-            with bcol:
-                if st.button("▼" if not st.session_state[row_key] else "▲",
-                             key=f"tgl_{row_key}", use_container_width=True):
-                    st.session_state[row_key] = not st.session_state[row_key]
-                    st.rerun()
-            with tcol:
-                st.markdown(title)
-            if st.session_state[row_key]:
-                render_fn()
-
     if kw_f:
         # ── 搜尋模式
         filtered = [r for r in rows
@@ -1967,9 +1946,8 @@ elif "設備盤查" in menu:
             icon  = SYSTEM_ICONS.get(r.get("系統別",""), "🔧")
             a_tag = " ⭐A級" if r["_seu"]=="A" else ""
             title = f"{icon}[{r.get('系統別','')}] {r.get('設備名稱','')} ({r.get('設備編號','')})  ｜  {r['_kwh']:,.0f} kWh  評分{r['_sc']}{a_tag}"
-            idx = start + li
-            _lazy_row(f"detail_open_search_{idx}", title,
-                      lambda r=r, idx=idx: _render_equipment_detail(r, get_db_idx(r), idx))
+            with st.expander(title, expanded=False):
+                _render_equipment_detail(r, get_db_idx(r), start + li)
         if total_pages > 1:
             st.caption(f"第 {page} / {total_pages} 頁")
     else:
@@ -2043,9 +2021,8 @@ elif "設備盤查" in menu:
         for li,r in enumerate(sorted_sl[start:start + PAGE_SIZE]):
             a_tag = " ⭐A級" if r["_seu"]=="A" else ""
             title = f"{r.get('設備名稱','')} ({r.get('設備編號','')})  ｜  {r['_kwh']:,.0f} kWh/年  評分{r['_sc']}{a_tag}"
-            idx = start + li
-            _lazy_row(f"detail_open_{sn}_{idx}", title,
-                      lambda r=r, idx=idx: _render_equipment_detail(r, get_db_idx(r), idx))
+            with st.expander(title, expanded=False):
+                _render_equipment_detail(r, get_db_idx(r), start + li)
         if total_pages > 1:
             st.caption(f"第 {page} / {total_pages} 頁（共 {len(sorted_sl)} 台）")
 
