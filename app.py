@@ -53,9 +53,12 @@ def compress_photo_to_b64(uploaded_file, max_dim=PHOTO_MAX_DIM, quality=PHOTO_QU
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: 置中表格
 # ─────────────────────────────────────────────────────────────────────────────
-def centered_table(df, context="default"):
+def centered_table(df, context="default", max_height=None):
     """將 DataFrame 轉為可自訂字體與對齊的 HTML 表格
     context: dash / equip / score / energy / load / default
+    max_height: 選填，設定後表格會限制在這個高度（px）內，超過的部分改成
+                表格內部上下捲動，不會把整個頁面往下撐得很長；表頭會固定在
+                捲動區塊最上方，捲動時仍看得到欄位名稱。
     """
     fmt = st.session_state.get("fmt", {})
     ff  = fmt.get("font_family", "Noto Sans TC")
@@ -86,7 +89,13 @@ def centered_table(df, context="default"):
         cells = "".join(f"<td>{v}</td>" for v in row.values)
         rows_html += f"<tr>{cells}</tr>"
     headers = "".join(f"<th>{col}</th>" for col in df.columns)
-    html = f"""{styles}<table class="ctable"><thead><tr>{headers}</tr></thead><tbody>{rows_html}</tbody></table>"""
+    table_html = f"""<table class="ctable"><thead><tr>{headers}</tr></thead><tbody>{rows_html}</tbody></table>"""
+    if max_height:
+        wrap_style = f"max-height:{max_height}px; overflow-y:auto; border:1px solid #e2e8f0; border-radius:6px;"
+        sticky_css = "<style>.ctable-scroll .ctable th { position: sticky; top: 0; z-index: 1; }</style>"
+        html = f"""{styles}{sticky_css}<div class="ctable-scroll" style="{wrap_style}">{table_html}</div>"""
+    else:
+        html = f"""{styles}{table_html}"""
     st.markdown(html, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1778,7 +1787,7 @@ if "儀表板" in menu:
             "年耗電(kWh)": f"{r['_kwh']:,.0f}",
             "重大性評分":  r["_sc"],
             "管理者":       r.get("設備管理者", ""),
-        } for r in a_rows]), context="dash")
+        } for r in a_rows]), context="dash", max_height=420)
 
     # ── 各項能源耗能占比
     st.divider()
