@@ -141,7 +141,13 @@ st.markdown("""
 # 輸入/選擇後要按確認才會真的套用，避免每打一個字、每點一次 +/- 就整頁重跑。
 # ─────────────────────────────────────────────────────────────────────────────
 def narrow_text_with_confirm(label, state_key, key_prefix):
-    """窄版文字輸入框（搜尋用）。回傳目前「已確認」的值。"""
+    """窄版文字輸入框（搜尋用）。回傳目前「已確認」的值。
+
+    有個容易踩到的陷阱：使用者把框內文字清空後，如果沒有再按一次「確認」，
+    畫面上看起來是空的，但實際套用的搜尋條件其實還是「清空前」最後一次確認的
+    文字，導致篩選看起來莫名其妙搜不到任何東西。這裡當偵測到「使用者把框清成
+    空白」時直接自動套用空字串，不用使用者多按一次確認，才不會卡住。
+    """
     if state_key not in st.session_state:
         st.session_state[state_key] = ""
     col, _sp = st.columns([1, 2])
@@ -154,6 +160,9 @@ def narrow_text_with_confirm(label, state_key, key_prefix):
             if st.button("確認", key=f"{key_prefix}_confirm", use_container_width=True):
                 st.session_state[state_key] = draft
                 st.rerun()
+    if draft == "" and st.session_state[state_key] != "":
+        st.session_state[state_key] = ""
+        st.rerun()
     return st.session_state[state_key]
 
 def narrow_select_with_confirm(label, options, state_key, key_prefix):
@@ -1926,7 +1935,7 @@ elif "設備盤查" in menu:
     if kw_f:
         # ── 搜尋模式
         filtered = [r for r in rows
-                    if (seu_f=="全部" or (seu_f=="A 級重大設備" and r["_seu"]=="A") or (seu_f=="一般設備" and r["_seu"]!="-"))
+                    if (seu_f=="全部" or (seu_f=="A 級重大設備" and r["_seu"]=="A") or (seu_f=="一般設備" and r["_seu"]!="A"))
                     and kw_f.lower() in f"{r.get('設備名稱','')} {r.get('設備編號','')} {r.get('設備部門','')}".lower()]
         st.caption(f"搜尋結果：**{len(filtered)}** 筆")
 
