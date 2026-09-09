@@ -1591,6 +1591,18 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                 e_hrs  = st.number_input("年運轉時數", value=float(cur.get("運轉時數(hr/年)") or 0), min_value=0.0)
                 e_crit = st.slider("自評重大性", 1, 5, int(cur.get("自評重大性") or 3))
                 e_mgr  = st.text_input("設備管理者", value=str(cur.get("設備管理者","") or ""))
+            # 這 5 個欄位原本只會顯示在上方的唯讀資料表，卻沒有對應的輸入框可以改，
+            # 導致「畫面上明明有這一列，卻怎麼改都改不動」。這裡補齊，跟上面的欄位一起存檔。
+            e4, e5, e6 = st.columns(3)
+            with e4:
+                e_type = st.text_input("型式說明", value=str(cur.get("設備型式","") or ""))
+                e_contractor = st.text_input("外包商承攬商", value=str(cur.get("外包商承攬商","") or ""))
+            with e5:
+                e_bldg  = st.text_input("所在棟別", value=str(cur.get("所在棟別","") or ""))
+                e_floor = st.text_input("所在樓層", value=str(cur.get("所在樓層","") or ""))
+            with e6:
+                e_year = st.number_input("設備年份", value=int(cur.get("設備年份") or datetime.now().year),
+                                          min_value=1980, max_value=datetime.now().year, step=1)
             up1 = st.file_uploader("更新外觀照片", type=["jpg","jpeg","png"], key=f"u1_{loop_idx}_{db_idx}")
             up2 = st.file_uploader("更新銘牌照片", type=["jpg","jpeg","png"], key=f"u2_{loop_idx}_{db_idx}")
             up2b = st.file_uploader("新增/更新銘牌照片2（選填，第2個馬達名牌）",
@@ -1603,6 +1615,9 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                     "設備名稱":e_name,"設備編號":e_id,"設備部門":e_dept,
                     "消耗功率(kW)":e_kw,"設備數量":e_qty,"負載率":e_load,
                     "運轉時數(hr/年)":e_hrs,"自評重大性":e_crit,"設備管理者":e_mgr,
+                    "設備型式":e_type,"所在棟別":e_bldg,"所在樓層":e_floor,
+                    "設備年份":e_year,"使用年數":datetime.now().year - int(e_year),
+                    "外包商承攬商":e_contractor,
                 })
                 photo_msgs = []
                 if up1:
