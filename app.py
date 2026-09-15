@@ -308,7 +308,36 @@ def score_power(kw):
     elif kw < 9.0: return 4
     else:          return 5
 
+def score_energy_share(kwh, total_kwh):
+    """設備耗能估比評分：這台設備的年耗電量佔全廠年總用電的百分比。"""
+    pct = (kwh / total_kwh * 100) if total_kwh else 0
+    if pct < 0.1:   return 1
+    elif pct < 0.2: return 2
+    elif pct < 0.5: return 3
+    elif pct < 1.0: return 4
+    else:           return 5
+
+def score_age(age_years):
+    """設備老舊度評分：依「使用年數」評分。"""
+    if age_years < 5:    return 1
+    elif age_years < 10: return 2
+    elif age_years < 15: return 3
+    elif age_years < 20: return 4
+    else:                return 5
+
+def score_operation(hrs):
+    """設備運轉度評分：依「年運轉時數」評分。"""
+    if hrs <= 1460:   return 1
+    elif hrs <= 2920: return 2
+    elif hrs <= 4380: return 3
+    elif hrs <= 5840: return 4
+    else:             return 5
+
 def calc_row(rec):
+    """算 A 級（重大能源使用設備）的分數。
+    如果這筆設備是從 Excel 匯入、Excel 裡本來就有算好「重大性評分」，優先直接採用
+    Excel 的數字（跟官方 Excel 對得起來），只有手動新增、或編輯過數值之後（編輯表單
+    存檔時會清掉 Excel 附帶的分數）才會由這裡自己重新用公式算一次。"""
     try:
         kw   = float(rec.get("消耗功率(kW)") or 0)
         load = float(rec.get("負載率") or 0)
@@ -316,11 +345,50 @@ def calc_row(rec):
         qty  = float(rec.get("設備數量") or 1)
         crit = float(rec.get("自評重大性") or 3)
         kwh  = kw * load * hrs * qty
-        sc   = round(score_consumption(kwh)*0.3 + score_power(kw)*0.4 + crit*0.3, 2)
-        seu  = "A" if sc >= 4.0 else "-"
+        if rec.get("_xl_sc") is not None:
+            sc  = round(float(rec["_xl_sc"]), 2)
+            seu = rec.get("_xl_seu") or ("A" if sc >= 4.0 else "-")
+        else:
+            sc  = round(score_consumption(kwh)*0.3 + score_power(kw)*0.4 + crit*0.3, 2)
+            seu = "A" if sc >= 4.0 else "-"
         return kwh, sc, seu
     except:
         return 0.0, 0.0, "-"
+
+def calc_priority(rec, kwh):
+    """優先改善項目鑑別（I 級）評分，對應「評分標準說明」頁面 tab2 的公式：
+    優先改善評分 = 耗能估比×15% + 老舊度×30% + 運轉度×5% + 改善頻率×20% + 改善難易度×30%
+    「能效改善頻率」「改善執行難易度」是廠內自評 1~5 分（跟「自評重大性」同一種輸入方式），
+    沒有填過的舊資料預設抓 3 分（跟自評重大性的預設值一致），避免舊設備突然變成極端值。
+    跟 calc_row 一樣，優先採用 Excel 原本就算好的分數；手動新增或編輯過的設備才會
+    由這裡自己重新用級距公式計算。"""
+    try:
+        hrs   = float(rec.get("運轉時數(hr/年)") or 0)
+        age   = float(rec.get("使用年數") or 0)
+        freq  = float(rec.get("能效改善頻率") or 3)
+        diff  = float(rec.get("改善執行難易度") or 3)
+        if rec.get("_xl_pri_score") is not None:
+            s_share = rec.get("_xl_pri_share")
+            s_age   = rec.get("_xl_pri_age")
+            s_op    = rec.get("_xl_pri_op")
+            freq    = rec.get("_xl_pri_freq", freq)
+            diff    = rec.get("_xl_pri_diff", diff)
+            pri     = round(float(rec["_xl_pri_score"]), 2)
+            lvl     = rec.get("_xl_pri_tag") or ("I" if pri >= 4.0 else "-")
+        else:
+            s_share = score_energy_share(kwh, TOTAL_KWH)
+            s_age   = score_age(age)
+            s_op    = score_operation(hrs)
+            pri = round(s_share*0.15 + s_age*0.30 + s_op*0.05 + freq*0.20 + diff*0.30, 2)
+            lvl = "I" if pri >= 4.0 else "-"
+        return {
+            "耗能估比分數": s_share, "老舊度分數": s_age, "運轉度分數": s_op,
+            "改善頻率分數": freq, "改善難易度分數": diff,
+            "優先改善評分": pri, "優先改善鑑別": lvl,
+        }
+    except:
+        return {"耗能估比分數":0,"老舊度分數":0,"運轉度分數":0,"改善頻率分數":0,
+                "改善難易度分數":0,"優先改善評分":0.0,"優先改善鑑別":"-"}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Excel 讀取
@@ -359,6 +427,26 @@ def read_system(sheet, sys_label):
     yr_c  = 14 if lit else 12
     age_c = 15 if lit else 13
     cr_c  = 20 if lit else 18
+
+    # Excel 本身在「重大性評分」「優先改善評分」這兩個區塊已經算好分數了（跟表4-x 這幾張
+    # 系統分頁裡欄位順序一致，照明因為多了「容量規格」「安定器型式」兩欄，所以整組都要
+    # 往右位移 2 欄）。這裡把 Excel 已經算好的分數也一起讀進來，優先信任 Excel 的數字，
+    # 不用再靠 Python 自己重新用級距去猜（尤其是「設備耗能估比」那個級距在原始 Excel 裡
+    # 文字有點跑掉、對不太準）。
+    off = 2 if lit else 0
+    freq_raw_c   = 17 + off   # 能效改善頻率（自評，1~5分）
+    diff_raw_c   = 19 + off   # 改善執行難易度（自評，1~5分）
+    xl_kwh_sc_c  = 20 + off   # 單一設備耗能量分數
+    xl_kw_sc_c   = 21 + off   # 單一設備消耗功率分數
+    xl_sc_c      = 23 + off   # 重大性評分（總分）
+    xl_seu_c     = 24 + off   # 重大能源設備鑑別（A／-）
+    xl_share_c   = 25 + off   # 設備耗能估比分數
+    xl_age_c     = 26 + off   # 設備老舊度分數
+    xl_op_c      = 27 + off   # 設備運轉度分數
+    xl_freq_sc_c = 28 + off   # 能效改善頻率分數（跟 freq_raw 通常同一個值）
+    xl_diff_sc_c = 29 + off   # 改善執行難易度分數（跟 diff_raw 通常同一個值）
+    xl_pri_c     = 30 + off   # 優先改善評分（總分）
+    xl_pri_tag_c = 31 + off   # 優先改善項目鑑別（I／-）
 
     skip = {
         '', 'nan', '設備名稱', '設備總耗電量', 'A級設備耗電量',
@@ -404,6 +492,19 @@ def read_system(sheet, sys_label):
             "相關變數":       str(g(row, 36 if not lit else 38) or ""),
             "外觀照片":       None,
             "銘牌照片":       None,
+            "能效改善頻率":   _sf(g(row, freq_raw_c)),
+            "改善執行難易度": _sf(g(row, diff_raw_c)),
+            "_xl_seu_kwh_score": _sf(g(row, xl_kwh_sc_c)),
+            "_xl_seu_kw_score":  _sf(g(row, xl_kw_sc_c)),
+            "_xl_sc":            _sf(g(row, xl_sc_c)),
+            "_xl_seu":           (str(g(row, xl_seu_c)).strip() if g(row, xl_seu_c) is not None else None),
+            "_xl_pri_share":     _sf(g(row, xl_share_c)),
+            "_xl_pri_age":       _sf(g(row, xl_age_c)),
+            "_xl_pri_op":        _sf(g(row, xl_op_c)),
+            "_xl_pri_freq":      _sf(g(row, xl_freq_sc_c)),
+            "_xl_pri_diff":      _sf(g(row, xl_diff_sc_c)),
+            "_xl_pri_score":     _sf(g(row, xl_pri_c)),
+            "_xl_pri_tag":       (str(g(row, xl_pri_tag_c)).strip() if g(row, xl_pri_tag_c) is not None else None),
         })
     return recs
 
@@ -1298,6 +1399,7 @@ def all_calc():
         seen_keys.add(dedup_key)
         kwh, sc, seu = calc_row(r)
         r.update({"_kwh": kwh, "_sc": sc, "_seu": seu})
+        r.update(calc_priority(r, kwh))
         rows.append(r)
     return rows
 
@@ -1574,6 +1676,35 @@ def _render_equipment_detail(r, db_idx, loop_idx):
   <div style='margin-top:8px;font-size:13px'>尚未上傳第2張銘牌照片</div>
   <div style='margin-top:4px;font-size:12px'>（如有第2個馬達名牌可在下方修改表單新增）</div>
 </div>""", unsafe_allow_html=True)
+
+    # 📐 評分明細：把「評分標準說明」頁面裡的兩種計算公式，實際套用在這台設備上算給你看，
+    # 不用再切到別的頁面對照公式、自己心算。
+    st.markdown("**📐 評分明細**")
+    sc_col1, sc_col2 = st.columns(2)
+    with sc_col1:
+        st.caption("重大能源使用鑑別（A 級）")
+        s_kwh_score = r.get("_xl_seu_kwh_score")
+        if s_kwh_score is None: s_kwh_score = score_consumption(r["_kwh"])
+        s_kw_score = r.get("_xl_seu_kw_score")
+        if s_kw_score is None: s_kw_score = score_power(float(r.get("消耗功率(kW)") or 0))
+        crit_score  = float(r.get("自評重大性") or 3)
+        df_a = pd.DataFrame({
+            "鑑別因子": ["單一設備耗能量", "單一設備消耗功率", "自評重大性", "重大性評分", "重大能源設備鑑別"],
+            "分數":     [s_kwh_score, s_kw_score, crit_score, r["_sc"],
+                        "⭐ A 級" if r["_seu"] == "A" else "一般設備"],
+        })
+        centered_table(df_a, context="equip")
+    with sc_col2:
+        st.caption("優先改善項目鑑別（I 級）")
+        df_i = pd.DataFrame({
+            "鑑別因子": ["設備耗能估比", "設備老舊度", "設備運轉度", "能效改善頻率",
+                        "改善執行難易度", "優先改善評分", "優先改善項目鑑別"],
+            "分數":     [r.get("耗能估比分數"), r.get("老舊度分數"), r.get("運轉度分數"),
+                        r.get("改善頻率分數"), r.get("改善難易度分數"), r.get("優先改善評分"),
+                        "🔧 I 級" if r.get("優先改善鑑別") == "I" else "一般設備"],
+        })
+        centered_table(df_i, context="equip")
+
     if st.session_state["edit_mode"] and db_idx is not None:
         st.markdown("---")
         cur = st.session_state["db"][db_idx]
@@ -1603,6 +1734,15 @@ def _render_equipment_detail(r, db_idx, loop_idx):
             with e6:
                 e_year = st.number_input("設備年份", value=int(cur.get("設備年份") or datetime.now().year),
                                           min_value=1980, max_value=datetime.now().year, step=1)
+            # 「優先改善項目鑑別（I 級）」評分要用到的兩個自評欄位，跟「自評重大性」一樣
+            # 是廠內人員手動評 1~5 分，不是自動算出來的。
+            e7, e8 = st.columns(2)
+            with e7:
+                e_freq = st.slider("能效改善頻率（1=5年內新機，5=10年以上從未改善）", 1, 5,
+                                    int(cur.get("能效改善頻率") or 3))
+            with e8:
+                e_diff = st.slider("改善執行難易度（1=不會改善，5=可立即改善）", 1, 5,
+                                    int(cur.get("改善執行難易度") or 3))
             up1 = st.file_uploader("更新外觀照片", type=["jpg","jpeg","png"], key=f"u1_{loop_idx}_{db_idx}")
             up2 = st.file_uploader("更新銘牌照片", type=["jpg","jpeg","png"], key=f"u2_{loop_idx}_{db_idx}")
             up2b = st.file_uploader("新增/更新銘牌照片2（選填，第2個馬達名牌）",
@@ -1618,7 +1758,15 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                     "設備型式":e_type,"所在棟別":e_bldg,"所在樓層":e_floor,
                     "設備年份":e_year,"使用年數":datetime.now().year - int(e_year),
                     "外包商承攬商":e_contractor,
+                    "能效改善頻率":e_freq,"改善執行難易度":e_diff,
                 })
+                # 手動改過數值之後，原本從 Excel 帶進來的分數就不準了（例如功率、負載率
+                # 都改了，Excel 當初算好的重大性評分卻還停在舊數字）。這裡清掉 Excel 附帶
+                # 的分數欄位，改回讓程式用公式重新即時計算，兩邊才不會對不起來。
+                for _xl_key in ("_xl_seu_kwh_score","_xl_seu_kw_score","_xl_sc","_xl_seu",
+                                "_xl_pri_share","_xl_pri_age","_xl_pri_op","_xl_pri_freq",
+                                "_xl_pri_diff","_xl_pri_score","_xl_pri_tag"):
+                    st.session_state["db"][db_idx].pop(_xl_key, None)
                 photo_msgs = []
                 if up1:
                     b64, ok, ck = compress_photo_to_b64(up1)
@@ -1911,6 +2059,11 @@ elif "設備盤查" in menu:
                     in_hrs  = st.number_input("年運轉時數 (hr)", min_value=0.0, value=2000.0)
                     in_yr   = st.number_input("設備年份", 1990, 2030, 2015)
                     in_crit = st.slider("自評重大性 (1~5)", 1, 5, 3)
+                c4, c5 = st.columns(2)
+                with c4:
+                    in_freq = st.slider("能效改善頻率（1=5年內新機，5=10年以上從未改善）", 1, 5, 3)
+                with c5:
+                    in_diff = st.slider("改善執行難易度（1=不會改善，5=可立即改善）", 1, 5, 3)
                 pic1 = st.file_uploader("📷 設備外觀照片", type=["jpg","jpeg","png"])
                 pic2 = st.file_uploader("🏷️ 銘牌照片",     type=["jpg","jpeg","png"])
                 pic2b = st.file_uploader("🏷️ 銘牌照片2（選填，若有第2個馬達名牌）", type=["jpg","jpeg","png"])
@@ -1937,6 +2090,7 @@ elif "設備盤查" in menu:
                             "運轉時數(hr/年)": in_hrs, "設備年份": in_yr,
                             "使用年數": datetime.now().year - int(in_yr),
                             "自評重大性": in_crit,
+                            "能效改善頻率": in_freq, "改善執行難易度": in_diff,
                             "外觀照片": photo1_b64,
                             "銘牌照片": photo2_b64,
                             "銘牌照片2": photo2b_b64,
@@ -2061,7 +2215,11 @@ elif "設備盤查" in menu:
             st.caption(f"第 {page} / {total_pages} 頁（共 {len(sorted_sl)} 台）")
 
         st.divider()
-        csv_data = pd.DataFrame([{k:v for k,v in r.items() if k not in ("外觀照片","銘牌照片","銘牌照片2","_kwh","_sc","_seu")} for r in sl]).to_csv(index=False).encode("utf-8-sig")
+        _csv_exclude = ("外觀照片","銘牌照片","銘牌照片2","_kwh","_sc","_seu",
+                        "_xl_seu_kwh_score","_xl_seu_kw_score","_xl_sc","_xl_seu",
+                        "_xl_pri_share","_xl_pri_age","_xl_pri_op","_xl_pri_freq",
+                        "_xl_pri_diff","_xl_pri_score","_xl_pri_tag")
+        csv_data = pd.DataFrame([{k:v for k,v in r.items() if k not in _csv_exclude} for r in sl]).to_csv(index=False).encode("utf-8-sig")
         st.download_button(f"⬇️ 匯出 {sn} CSV", csv_data,
             f"SEU_{sn}_{datetime.now().strftime('%Y%m%d')}.csv","text/csv",key=f"dl_{sn}")
 
