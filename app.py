@@ -924,6 +924,48 @@ def pull_equipment_from_supabase():
     except Exception as e:
         return None, f"下載失敗：{e}"
 
+def restore_photos_from_storage(records):
+    """依檔名把 Storage 裡的照片補回目前的設備清單（只補「目前沒有照片」的欄位，不覆蓋既有照片）。
+    檔名規則與 push_equipment_to_supabase 完全一致：{設備編號}_appearance.jpg／_nameplate.jpg／_nameplate2.jpg。
+    不依賴 equipment 資料表，所以即使資料表被清空，只要 Storage 裡還有檔案就救得回來。
+    回傳 (各欄位補回張數的 dict，失敗時為 None, 訊息)"""
+    sb = get_supabase_client()
+    if not sb:
+        return None, "尚未設定 Supabase 連線資訊"
+    names = set()
+    try:
+        offset = 0
+        while True:
+            batch = sb.storage.from_(SUPABASE_PHOTO_BUCKET).list("", {"limit": 1000, "offset": offset})
+            if not batch:
+                break
+            names.update(f.get("name") for f in batch if f.get("name"))
+            if len(batch) < 1000:
+                break
+            offset += 1000
+    except Exception as e:
+        return None, f"讀取 Storage 檔案清單失敗：{e}"
+
+    jobs = []
+    for i, rec in enumerate(records):
+        code = str(rec.get("設備編號") or f"NOID_{i}").strip() or f"NOID_{i}"
+        for field, suffix in (("外觀照片", "appearance"), ("銘牌照片", "nameplate"), ("銘牌照片2", "nameplate2")):
+            fn = f"{code}_{suffix}.jpg"
+            if not rec.get(field) and fn in names:
+                jobs.append((rec, field, fn))
+
+    from concurrent.futures import ThreadPoolExecutor
+    def _dl(job):
+        return job, _sb_download_photo(sb, job[2])
+
+    counts = {"外觀照片": 0, "銘牌照片": 0, "銘牌照片2": 0}
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for (rec, field, _fn), b64 in ex.map(_dl, jobs):
+            if b64:
+                rec[field] = b64
+                counts[field] += 1
+    return counts, f"Storage 內共 {len(names)} 個檔案"
+
 # ── 能源基線追蹤－每月單位產量耗能 ──────────────────────────────────────────
 def push_enb_monthly_unit_to_supabase(data, year=None):
     sb = get_supabase_client()
@@ -2104,7 +2146,43 @@ elif "設備盤查" in menu:
     # ── 搜尋 + 重大性篩選（窄框 + 確認鍵，輸入完按確認才套用）
     kw_f  = narrow_text_with_confirm("🔍 搜尋設備名稱 / 編號 / 部門（跨系統搜尋）", "kw_f_val", "kw_f")
     seu_f = narrow_select_with_confirm("重大性篩選", ["全部", "A 級重大設備", "一般設備"], "seu_f_val", "seu_f")
+    # 照片缺漏相關功能（篩選、統計、清單、下載）只在管理員解鎖（修改模式）時顯示；
+    # 唯讀模式固定視為「全部」，_photo_match 會直接放行，不影響原本的清單。
+    if st.session_state["edit_mode"]:
+        photo_f = narrow_select_with_confirm("照片狀態篩選", ["全部", "缺外觀照片", "缺銘牌照片", "外觀與銘牌皆缺", "照片齊全"],
+                                             "photo_f_val", "photo_f")
+    else:
+        photo_f = "全部"
     rows  = all_calc()
+
+    # 照片缺漏統計（不受上面篩選影響，永遠統計全部設備）＋缺漏清單＋可下載 CSV（僅修改模式）
+    if st.session_state["edit_mode"]:
+        n_no_app  = sum(1 for r in rows if not r.get("外觀照片"))
+        n_no_name = sum(1 for r in rows if not r.get("銘牌照片"))
+        n_no_both = sum(1 for r in rows if not r.get("外觀照片") and not r.get("銘牌照片"))
+        st.caption(f"📷 照片缺漏（全部 {len(rows)} 台）：缺外觀照片 **{n_no_app}** 台｜"
+                   f"缺銘牌照片 **{n_no_name}** 台｜兩者皆缺 **{n_no_both}** 台")
+        _missing = [{
+            "系統別": r.get("系統別",""), "設備名稱": r.get("設備名稱",""), "設備編號": r.get("設備編號",""),
+            "設備部門": r.get("設備部門",""), "所在棟別": r.get("所在棟別",""),
+            "缺外觀照片": "是" if not r.get("外觀照片") else "",
+            "缺銘牌照片": "是" if not r.get("銘牌照片") else "",
+        } for r in rows if not r.get("外觀照片") or not r.get("銘牌照片")]
+        if _missing:
+            _df_missing = pd.DataFrame(_missing)
+            with st.expander(f"📋 缺照片設備清單（{len(_missing)} 台）", expanded=False):
+                st.dataframe(_df_missing, use_container_width=True, hide_index=True, height=320)
+            st.download_button("⬇️ 下載缺照片設備清單（CSV）",
+                               _df_missing.to_csv(index=False).encode("utf-8-sig"),
+                               file_name="缺照片設備清單.csv", mime="text/csv", key="dl_missing_photos")
+
+    def _photo_match(r):
+        a, n = bool(r.get("外觀照片")), bool(r.get("銘牌照片"))
+        if photo_f == "缺外觀照片":     return not a
+        if photo_f == "缺銘牌照片":     return not n
+        if photo_f == "外觀與銘牌皆缺": return (not a) and (not n)
+        if photo_f == "照片齊全":       return a and n
+        return True
 
     # 建立一次性的索引表（O(1) 查找）。原本 get_db_idx() 每叫一次就把整個資料庫
     # （335 筆）掃過一遍，335 台設備等於做了超過 10 萬次比對，是頁面很慢的主因之一。
@@ -2123,6 +2201,7 @@ elif "設備盤查" in menu:
         # ── 搜尋模式
         filtered = [r for r in rows
                     if (seu_f=="全部" or (seu_f=="A 級重大設備" and r["_seu"]=="A") or (seu_f=="一般設備" and r["_seu"]!="A"))
+                    and _photo_match(r)
                     and kw_f.lower() in f"{r.get('設備名稱','')} {r.get('設備編號','')} {r.get('設備部門','')}".lower()]
         st.caption(f"搜尋結果：**{len(filtered)}** 筆")
 
@@ -2145,6 +2224,7 @@ elif "設備盤查" in menu:
         for r in rows:
             if seu_f=="A 級重大設備" and r["_seu"]!="A": continue
             if seu_f=="一般設備" and r["_seu"]=="A": continue
+            if not _photo_match(r): continue
             s = r.get("系統別","其他")
             sys_rows.setdefault(s,[]).append(r)
 
@@ -3087,6 +3167,19 @@ elif "Excel" in menu:
                         log_activity("Supabase下載", f"設備資料：共 {len(data)} 筆")
                         st.success(f"✅ 已下載 {len(data)} 筆設備資料！")
                         st.rerun()
+
+            if st.button("🖼️ 從 Storage 依檔名補回照片（只補缺的，不覆蓋既有照片）",
+                         use_container_width=True, key="sb_restore_photos"):
+                with st.spinner("掃描 Storage 並下載照片中，請稍候…"):
+                    _cnt, _msg = restore_photos_from_storage(st.session_state["db"])
+                if _cnt is None:
+                    st.error(f"❌ {_msg}")
+                else:
+                    save_json(st.session_state["db"])
+                    _total = sum(_cnt.values())
+                    log_activity("Supabase補回照片", f"{_msg}；補回 {_total} 張")
+                    st.success(f"✅ {_msg}；共補回 {_total} 張"
+                               f"（外觀 {_cnt['外觀照片']}、銘牌 {_cnt['銘牌照片']}、銘牌2 {_cnt['銘牌照片2']}）")
 
             st.markdown("**能源基線追蹤（單位產量耗能／整廠用電量／重大設備）**")
             e1, e2, e3 = st.columns(3)
