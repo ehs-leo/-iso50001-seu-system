@@ -2228,6 +2228,74 @@ elif "設備盤查" in menu:
 
     PAGE_SIZE = 20  # 每頁最多顯示幾台設備，避免一次把上百個展開卡片（含照片）全部畫出來
 
+    def _equipment_table_view(items, start, key_prefix, show_system=False):
+        """設備清單改用「表格＋點選一列看詳情」：
+        一頁 20 台用一張表格一次呈現（可點欄位標題排序），只有被點選的那一台才會
+        去渲染詳情與解碼照片，比 20 個展開列輕很多。照片有無欄位只在管理員解鎖後顯示。"""
+        import hashlib
+        if not items:
+            st.info("沒有符合條件的設備。")
+            return
+        is_admin = st.session_state["edit_mode"]
+        _has_pill = hasattr(st.column_config, "MultiselectColumn")
+        recs = []
+        for r in items:
+            rec = {}
+            if show_system:
+                rec["系統"] = r.get("系統別", "")
+            rec["設備名稱"] = r.get("設備名稱", "")
+            rec["編號"] = r.get("設備編號", "")
+            rec["部門"] = r.get("設備部門", "")
+            rec["年耗電(kWh)"] = int(round(r["_kwh"]))
+            # 評分 4.0 以上顯示成淡紅色圓角標籤，其餘維持純數字。圓角標籤靠 MultiselectColumn
+            # （Streamlit 1.50 起才有）；版本不夠新時退回一般數字欄，不會報錯。
+            rec["評分"] = [f"{r['_sc']:.1f}"] if _has_pill else r["_sc"]
+            rec["A級"] = "⭐ A級" if r["_seu"] == "A" else ""
+            if is_admin:
+                rec["外觀照片"] = "✓" if r.get("外觀照片") else "✗"
+                rec["銘牌照片"] = "✓" if r.get("銘牌照片") else "✗"
+            recs.append(rec)
+        df = pd.DataFrame(recs)
+        # 全部欄位統一靠左對齊（標題與內容同一條線）。alignment 參數較新的版本才有，
+        # 不支援時自動略過，不會報錯。
+        def _aligned(col_cls, **kw):
+            try:
+                return col_cls(alignment="left", **kw)
+            except TypeError:
+                return col_cls(**kw)
+        _col_cfg = {}
+        for _c in df.columns:
+            if _c == "年耗電(kWh)":
+                _col_cfg[_c] = _aligned(st.column_config.NumberColumn, format="%d")
+            elif _c == "評分" and not _has_pill:
+                _col_cfg[_c] = _aligned(st.column_config.NumberColumn, format="%.1f")
+            elif _c != "評分":
+                _col_cfg[_c] = _aligned(st.column_config.TextColumn)
+        if _has_pill:
+            # 標籤底色就是 color 本身，字色由程式依底色亮度自動選黑或白：
+            # 4.0 以上用中紅 #E24B4A（亮度偏低，自動配白字）；其餘用「全透明白」，沒有底色、字是黑色，看起來就是純數字。
+            _opts = sorted({f"{r['_sc']:.1f}" for r in items})
+            _col_cfg["評分"] = st.column_config.MultiselectColumn(
+                "評分", options=_opts, width="small",
+                color=["#E24B4A" if float(o) >= 4.0 else "#FFFFFF00" for o in _opts])
+        # key 帶入本頁設備清單的指紋：換頁、換系統、換篩選條件後，上一次點選的列號
+        # 不會誤指到新清單裡的另一台設備
+        sig = hashlib.md5("|".join(f"{r.get('設備編號','')}{r.get('設備名稱','')}" for r in items).encode()).hexdigest()[:8]
+        event = st.dataframe(
+            df, hide_index=True, use_container_width=True,
+            on_select="rerun", selection_mode="single-row",
+            key=f"tbl_{key_prefix}_{sig}",
+            height=min(38 * (len(df) + 1) + 3, 800),
+            column_config=_col_cfg,
+        )
+        sel = event.selection.rows if event and event.selection else []
+        if sel and 0 <= sel[0] < len(items):
+            r = items[sel[0]]
+            st.markdown(f"##### 📋 {r.get('設備名稱','')}（{r.get('設備編號','')}）")
+            _render_equipment_detail(r, get_db_idx(r), start + sel[0])
+        else:
+            st.caption("👆 點選上方表格任一列，下方顯示該設備的詳情與照片")
+
     if kw_f:
         # ── 搜尋模式
         filtered = [r for r in rows
@@ -2239,12 +2307,7 @@ elif "設備盤查" in menu:
         total_pages = max(1, math.ceil(len(filtered) / PAGE_SIZE))
         page = narrow_page_with_confirm("頁數", total_pages, "search_page_val", "search_page") if total_pages > 1 else 1
         start = (page - 1) * PAGE_SIZE
-        for li, r in enumerate(filtered[start:start + PAGE_SIZE]):
-            icon  = SYSTEM_ICONS.get(r.get("系統別",""), "🔧")
-            a_tag = " ⭐A級" if r["_seu"]=="A" else ""
-            title = f"{icon}[{r.get('系統別','')}] {r.get('設備名稱','')} ({r.get('設備編號','')})  ｜  {r['_kwh']:,.0f} kWh  評分{r['_sc']}{a_tag}"
-            with st.expander(title, expanded=False):
-                _render_equipment_detail(r, get_db_idx(r), start + li)
+        _equipment_table_view(filtered[start:start + PAGE_SIZE], start, f"search_{page}", show_system=True)
         if total_pages > 1:
             st.caption(f"第 {page} / {total_pages} 頁")
     else:
@@ -2317,11 +2380,7 @@ elif "設備盤查" in menu:
         total_pages = max(1, math.ceil(len(sorted_sl) / PAGE_SIZE))
         page = narrow_page_with_confirm(f"{sn} 頁數", total_pages, f"page_{sn}_val", f"page_{sn}") if total_pages > 1 else 1
         start = (page - 1) * PAGE_SIZE
-        for li,r in enumerate(sorted_sl[start:start + PAGE_SIZE]):
-            a_tag = " ⭐A級" if r["_seu"]=="A" else ""
-            title = f"{r.get('設備名稱','')} ({r.get('設備編號','')})  ｜  {r['_kwh']:,.0f} kWh/年  評分{r['_sc']}{a_tag}"
-            with st.expander(title, expanded=False):
-                _render_equipment_detail(r, get_db_idx(r), start + li)
+        _equipment_table_view(sorted_sl[start:start + PAGE_SIZE], start, f"{sn}_{page}")
         if total_pages > 1:
             st.caption(f"第 {page} / {total_pages} 頁（共 {len(sorted_sl)} 台）")
 
