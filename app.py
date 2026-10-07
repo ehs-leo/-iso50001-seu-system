@@ -348,7 +348,7 @@ def score_power(kw):
     if kw < 2.5:   return 1
     elif kw < 5.0: return 2
     elif kw < 7.5: return 3
-    elif kw < 9.0: return 4
+    elif kw < 10.0: return 4   # 依 Excel 表3-1a：7.5～未滿 10 kW 為 4 分，10 kW 以上為 5 分
     else:          return 5
 
 def score_energy_share(kwh, total_kwh):
@@ -533,7 +533,7 @@ def read_system(sheet, sys_label):
             "設備年份":       _sf(g(row, yr_c)),
             "使用年數":       _sf(g(row, age_c)),
             "自評重大性":     _sf(g(row, cr_c)),
-            "設備管理者":     str(g(row, 34) or ""),
+            "設備管理者":     str(g(row, 36 if lit else 34) or ""),
             "外包商承攬商":   str(g(row, 35 if not lit else 37) or ""),
             "相關變數":       str(g(row, 36 if not lit else 38) or ""),
             "外觀照片":       None,
@@ -2499,7 +2499,7 @@ elif "評分標準" in menu:
         return max(_all, key=lambda x: x["_sc"]) if _all else None
 
     _LBL_KWH = ["< 2,500", "2,500～5,499", "5,500～7,499", "7,500～9,999", "≥ 10,000"]
-    _LBL_KW  = ["< 2.5", "2.5～4.99", "5.0～7.49", "7.5～8.99", "≥ 9.0"]
+    _LBL_KW  = ["< 2.5", "2.5～4.99", "5.0～7.49", "7.5～9.99", "≥ 10"]
     _LBL_AGE = ["0～4 年", "5～9 年", "10～14 年", "15～19 年", "≥ 20 年"]
     _LBL_HRS = ["0～1,460", "1,461～2,920", "2,921～4,380", "4,381～5,840", "5,841～8,760"]
 
@@ -2587,7 +2587,7 @@ elif "評分標準" in menu:
         st.markdown(_score_matrix_html(
             [("年耗電量 (kWh)", "30%"), ("消耗功率 (kW)", "40%"), ("工廠自評重大性", "30%")],
             [["— ～ 2,499", "2,500 ～ 5,499", "5,500 ～ 7,499", "7,500 ～ 9,999", "10,000 以上"],
-             ["— ～ 2.49", "2.5 ～ 4.99", "5.0 ～ 7.49", "7.5 ～ 8.99", "9.0 以上"],
+             ["— ～ 2.49", "2.5 ～ 4.99", "5.0 ～ 7.49", "7.5 ～ 9.99", "10 以上"],
              ["1（非重要管控項目）", "2", "3（需再評估）", "4", "5（既有或應該列入管控）"]],
             highlight=None, ex_name=(f"{_ex.get('設備編號','')}" if _ex else "")), unsafe_allow_html=True)
         st.caption("橫著看：找到各因子落在哪一級，就得到那一列最左邊的分數；三個因子權重合計 100%。")
