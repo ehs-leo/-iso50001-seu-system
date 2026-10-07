@@ -42,6 +42,30 @@ def compress_photo_bytes(raw_bytes, max_dim=PHOTO_MAX_DIM, quality=PHOTO_QUALITY
     except Exception:
         return raw_bytes
 
+@st.cache_data(show_spinner=False, max_entries=300)
+def _photo_display_bytes(b64_str, rot=0, max_dim=900):
+    """把資料庫裡的原始照片（base64，長邊最多 1600px）轉成「顯示用」的小圖 JPEG 位元組。
+    為什麼要這樣做：st.image 收到 PIL 圖片物件時，每次重新整理都會再縮圖、再編碼一次；
+    而且原圖比畫面上顯示的大很多，傳到瀏覽器也慢。這裡改成：
+      1. 解碼時就讓 JPEG 直接縮小（draft 模式，比完整解碼快很多）
+      2. 長邊限制在 max_dim（視窗裡一張圖最寬也只有幾百 px）
+      3. 結果快取：同一張照片（同一個旋轉角度）第二次起直接讀快取，不再解碼
+    st.image 收到現成的 JPEG 位元組、寬度又夠小時，會原封不動送出，不再重新編碼。"""
+    raw = base64.b64decode(b64_str)
+    img = Image.open(BytesIO(raw))
+    try:
+        img.draft("RGB", (max_dim, max_dim))
+    except Exception:
+        pass
+    img = img.convert("RGB")
+    if rot:
+        img = img.rotate(-rot, expand=True)
+    if max(img.size) > max_dim:
+        img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+    out = BytesIO()
+    img.save(out, format="JPEG", quality=82)
+    return out.getvalue()
+
 def compress_photo_to_b64(uploaded_file, max_dim=PHOTO_MAX_DIM, quality=PHOTO_QUALITY):
     """接收 st.file_uploader 回傳的檔案物件，壓縮後回傳 (base64字串, 原始KB, 壓縮後KB)"""
     raw_bytes = uploaded_file.read()
@@ -120,6 +144,20 @@ st.markdown("""
   .st-key-energy_link_box a { background:#ffffff !important; border:none !important; border-radius:8px; }
   .st-key-energy_link_box a:hover { background:#e2e8f0 !important; }
   .st-key-energy_link_box a, .st-key-energy_link_box a * { color:#1a3a5c !important; font-weight:500; }
+  /* 詳情視窗右上角的關閉鈕：紅色圓鈕、白色粗 X、加大。選取方式是視窗容器（stDialog）底下
+     aria-label 為 Close 的按鈕；不改它的位置（position），只改外觀與大小。 */
+  [data-testid="stDialog"] button[aria-label="Close"] {
+    width:36px !important; height:36px !important; min-width:36px !important;
+    border-radius:50% !important; padding:0 !important;
+    background:#E24B4A !important; color:#ffffff !important; opacity:1 !important;
+    display:flex !important; align-items:center; justify-content:center;
+    box-shadow:0 1px 4px rgba(0,0,0,.28);
+  }
+  [data-testid="stDialog"] button[aria-label="Close"]:hover { background:#c93a39 !important; }
+  [data-testid="stDialog"] button[aria-label="Close"] svg {
+    width:18px !important; height:18px !important; color:#ffffff !important; fill:#ffffff;
+  }
+  [data-testid="stDialog"] button[aria-label="Close"] svg path { stroke:#ffffff; stroke-width:2.5; }
   .kpi {
     background:#fff; border-radius:12px; padding:14px 10px;
     box-shadow:0 1px 6px rgba(0,0,0,.08); text-align:center;
@@ -1659,13 +1697,10 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                 st.session_state["db"][db_idx].get("外觀照片") if db_idx is not None else None)
             if photo1_data:
                 try:
-                    img1 = Image.open(BytesIO(base64.b64decode(photo1_data))).convert("RGB")
-                    if st.session_state[rot_key1] != 0:
-                        img1 = img1.rotate(-st.session_state[rot_key1], expand=True)
-                    st.image(img1, use_container_width=True)
+                    st.image(_photo_display_bytes(photo1_data, st.session_state[rot_key1]),
+                             use_container_width=True)
                 except Exception as e:
                     st.warning(f"顯示失敗：{e}")
-                    img1 = None
                 if st.session_state.get("edit_mode"):
                     rc1a, rc1b = st.columns(2)
                     with rc1a:
@@ -1694,13 +1729,10 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                 st.session_state["db"][db_idx].get("銘牌照片") if db_idx is not None else None)
             if photo2_data:
                 try:
-                    img2 = Image.open(BytesIO(base64.b64decode(photo2_data))).convert("RGB")
-                    if st.session_state[rot_key2] != 0:
-                        img2 = img2.rotate(-st.session_state[rot_key2], expand=True)
-                    st.image(img2, use_container_width=True)
+                    st.image(_photo_display_bytes(photo2_data, st.session_state[rot_key2]),
+                             use_container_width=True)
                 except Exception as e:
                     st.warning(f"顯示失敗：{e}")
-                    img2 = None
                 if st.session_state.get("edit_mode"):
                     rc2a, rc2b = st.columns(2)
                     with rc2a:
@@ -1728,13 +1760,10 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                 st.caption("🏷️ 銘牌照片2（第2個馬達名牌，橫式）")
                 if photo2b_data:
                     try:
-                        img3 = Image.open(BytesIO(base64.b64decode(photo2b_data))).convert("RGB")
-                        if st.session_state[rot_key3] != 0:
-                            img3 = img3.rotate(-st.session_state[rot_key3], expand=True)
-                        st.image(img3, use_container_width=True)
+                        st.image(_photo_display_bytes(photo2b_data, st.session_state[rot_key3]),
+                                 use_container_width=True)
                     except Exception as e:
                         st.warning(f"顯示失敗：{e}")
-                        img3 = None
                     if st.session_state.get("edit_mode"):
                         rc3a, rc3b = st.columns(2)
                         with rc3a:
@@ -2236,6 +2265,10 @@ elif "設備盤查" in menu:
 
     PAGE_SIZE = 20  # 每頁最多顯示幾台設備，避免一次把上百個展開卡片（含照片）全部畫出來
 
+    # @st.fragment：點表格選設備時，只重跑「表格＋詳情視窗」這一小塊，不用把整頁
+    # （側邊欄、篩選列、摘要卡片、全部設備重新計分…）整個重跑一遍，點選反應會快很多。
+    # 若部署後發現表格或視窗行為怪怪的，把下面這一行 @st.fragment 刪掉就會退回整頁重跑。
+    @st.fragment
     def _equipment_table_view(items, start, key_prefix, show_system=False):
         """設備清單改用「表格＋點選設備名稱彈出詳情視窗」：
         一頁 20 台用一張表格一次呈現（可點欄位標題排序），只有被點選的那一台才會
