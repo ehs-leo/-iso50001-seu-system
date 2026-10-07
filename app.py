@@ -2583,10 +2583,6 @@ elif "評分標準" in menu:
             ]
             st.markdown(_example_card_html(_ex, _rows_a, f"{_ex['_sc']:.1f}", _ex["_seu"] == "A",
                                            "A 級重大能源使用設備", "一般設備"), unsafe_allow_html=True)
-        st.warning(
-            "📝 **v2.2 更新：** 這裡的權重與公式已改為和系統實際計算邏輯（`calc_row()`）一致，"
-            "新增了原本沒有顯示的「設備功率」評分。"
-        )
         st.markdown("#### 評分對照矩陣（鑑別因子、權重與級距）")
         st.markdown(_score_matrix_html(
             [("年耗電量 (kWh)", "30%"), ("消耗功率 (kW)", "40%"), ("工廠自評重大性", "30%")],
