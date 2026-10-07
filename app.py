@@ -2229,7 +2229,7 @@ elif "設備盤查" in menu:
     PAGE_SIZE = 20  # 每頁最多顯示幾台設備，避免一次把上百個展開卡片（含照片）全部畫出來
 
     def _equipment_table_view(items, start, key_prefix, show_system=False):
-        """設備清單改用「表格＋點選一列看詳情」：
+        """設備清單改用「表格＋點選設備名稱看詳情」：
         一頁 20 台用一張表格一次呈現（可點欄位標題排序），只有被點選的那一台才會
         去渲染詳情與解碼照片，比 20 個展開列輕很多。照片有無欄位只在管理員解鎖後顯示。"""
         import hashlib
@@ -2281,20 +2281,25 @@ elif "設備盤查" in menu:
         # key 帶入本頁設備清單的指紋：換頁、換系統、換篩選條件後，上一次點選的列號
         # 不會誤指到新清單裡的另一台設備
         sig = hashlib.md5("|".join(f"{r.get('設備編號','')}{r.get('設備名稱','')}" for r in items).encode()).hexdigest()[:8]
+        # 表格最多顯示約 10 列高度（超過的在表格內捲動），這樣勾選後詳情就出現在同一個畫面內，
+        # 不用先捲過 20 列才看到。
         event = st.dataframe(
             df, hide_index=True, use_container_width=True,
-            on_select="rerun", selection_mode="single-row",
+            on_select="rerun", selection_mode="single-cell",
             key=f"tbl_{key_prefix}_{sig}",
-            height=min(38 * (len(df) + 1) + 3, 800),
+            height=min(38 * (len(df) + 1) + 3, 38 * 11 + 3),
             column_config=_col_cfg,
         )
-        sel = event.selection.rows if event and event.selection else []
-        if sel and 0 <= sel[0] < len(items):
-            r = items[sel[0]]
+        # 單格選取：點表格內任何一格（例如設備名稱）就算選到那一列。
+        # cells 是 [(列號, 欄位名稱)]，single-cell 模式下最多一筆；點欄位標題仍是排序。
+        _cells = event.selection.cells if event and event.selection else []
+        sel_row = _cells[0][0] if _cells else None
+        if sel_row is not None and 0 <= sel_row < len(items):
+            r = items[sel_row]
             st.markdown(f"##### 📋 {r.get('設備名稱','')}（{r.get('設備編號','')}）")
-            _render_equipment_detail(r, get_db_idx(r), start + sel[0])
+            _render_equipment_detail(r, get_db_idx(r), start + sel_row)
         else:
-            st.caption("👆 點選上方表格任一列，下方顯示該設備的詳情與照片")
+            st.caption("👆 點選表格裡的設備名稱（或任一格），下方會顯示該設備的詳情與照片")
 
     if kw_f:
         # ── 搜尋模式
