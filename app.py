@@ -1479,8 +1479,8 @@ with st.sidebar:
     st.markdown("""
     <div style='text-align:center;padding:14px 0 10px'>
       <div style='font-size:34px'>⚡</div>
-      <div style='font-size:16px;font-weight:800;color:#fff'>永寬化學</div>
-      <div style='font-size:11px;color:#94a3b8;margin-top:2px'>ISO 50001 能源控制台</div>
+      <div style='font-size:20px;font-weight:800;color:#fff'>永寬化學</div>
+      <div style='font-size:15px;font-weight:500;color:#94a3b8;margin-top:4px'>ISO 50001 能源管理平台</div>
     </div>
     """, unsafe_allow_html=True)
     st.divider()
