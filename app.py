@@ -2593,7 +2593,7 @@ elif "評分標準" in menu:
             [["— ～ 2,499", "2,500 ～ 5,499", "5,500 ～ 7,499", "7,500 ～ 9,999", "10,000 以上"],
              ["— ～ 2.49", "2.5 ～ 4.99", "5.0 ～ 7.49", "7.5 ～ 8.99", "9.0 以上"],
              ["1（非重要管控項目）", "2", "3（需再評估）", "4", "5（既有或應該列入管控）"]],
-            highlight=_hl_a, ex_name=(f"{_ex.get('設備編號','')}" if _ex else "")), unsafe_allow_html=True)
+            highlight=None, ex_name=(f"{_ex.get('設備編號','')}" if _ex else "")), unsafe_allow_html=True)
         st.caption("橫著看：找到各因子落在哪一級，就得到那一列最左邊的分數；三個因子權重合計 100%。")
 
         st.markdown("<br>", unsafe_allow_html=True)
@@ -2640,7 +2640,7 @@ elif "評分標準" in menu:
              ["0 ～ 1,460 hr", "1,461 ～ 2,920 hr", "2,921 ～ 4,380 hr", "4,381 ～ 5,840 hr", "5,841 ～ 8,760 hr"],
              ["0 ～ 1（5年內新機）", "2", "3（10年以上能效改善1次）", "4", "5（10年以上從未改善）"],
              ["0 ～ 1（不會改善）", "2", "3（需再評估）", "4", "5（可立即改善）"]],
-            highlight=_hl_i, ex_name=(f"{_ex.get('設備編號','')}" if _ex else "")), unsafe_allow_html=True)
+            highlight=None, ex_name=(f"{_ex.get('設備編號','')}" if _ex else "")), unsafe_allow_html=True)
         st.caption("橫著看：找到各因子落在哪一級，就得到那一列最左邊的分數；五個因子權重合計 100%。")
 
         st.markdown("<br>", unsafe_allow_html=True)
