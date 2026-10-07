@@ -1448,6 +1448,28 @@ def all_calc():
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
+# 廠內「永寬化學-能源管理系統」（電表／溫濕度平面圖、歷史資料查詢）。這是內網位址，
+# 只有連在廠內網路的電腦點得開；從外網開 app 時點了會連不上，屬正常現象。
+ENERGY_MGMT_URL = "http://192.168.1.32/ExePage.aspx"
+
+def _energy_mgmt_url():
+    """回傳要給按鈕用的網址。
+    內網那台是 Basic 驗證（瀏覽器彈出帳密視窗），可以把帳密放進網址免輸入。
+    帳密不寫在程式碼／GitHub 裡，而是放在 Streamlit Secrets（ENERGY_MGMT_USER、
+    ENERGY_MGMT_PASSWORD）；而且只有管理員解鎖後才會帶帳密，沒解鎖或沒設定
+    Secrets 時一律退回不含帳密的普通網址（點開後照舊手動輸入）。"""
+    if not st.session_state.get("logged_in"):
+        return ENERGY_MGMT_URL
+    try:
+        user = st.secrets["ENERGY_MGMT_USER"]
+        pwd  = st.secrets["ENERGY_MGMT_PASSWORD"]
+    except Exception:
+        return ENERGY_MGMT_URL
+    from urllib.parse import quote, urlsplit
+    parts = urlsplit(ENERGY_MGMT_URL)
+    cred = f"{quote(str(user), safe='')}:{quote(str(pwd), safe='')}"
+    return f"{parts.scheme}://{cred}@{parts.netloc}{parts.path}"
+
 with st.sidebar:
     st.markdown("""
     <div style='text-align:center;padding:14px 0 10px'>
@@ -1506,6 +1528,9 @@ with st.sidebar:
         base_menu.append("從Excel重新載入")
         base_menu.append("版面格式設定")
     menu = st.radio("", base_menu, label_visibility="collapsed")
+
+    st.link_button("🌡️ 永寬能源管理系統（廠內網路）", _energy_mgmt_url(), use_container_width=True,
+                   help="開啟廠內電表／溫濕度平面圖與歷史資料查詢，需連在廠內網路才能開啟")
 
     st.divider()
     db_count = len(st.session_state["db"])
