@@ -895,6 +895,15 @@ def _sb_upload_photo(sb, b64_str, path):
     except Exception:
         return None
 
+def _sb_delete_photo(sb, path):
+    """從 Storage 刪除一張照片檔。檔案不存在或失敗都安靜略過，回傳是否成功。
+    移除照片時一併刪掉雲端檔案，否則「從 Storage 依檔名補回照片」會把它又補回來。"""
+    try:
+        sb.storage.from_(SUPABASE_PHOTO_BUCKET).remove([path])
+        return True
+    except Exception:
+        return False
+
 def _sb_download_photo(sb, path):
     """從 Storage 下載照片，回傳 base64 字串；找不到就回傳 None"""
     if not path:
@@ -1666,6 +1675,38 @@ def _render_equipment_detail(r, db_idx, loop_idx):
         if rot_key2 not in st.session_state: st.session_state[rot_key2] = 0
         if rot_key3 not in st.session_state: st.session_state[rot_key3] = 0
 
+        def _remove_photo_ui(photo_key, suffix, tag, rot_key):
+            """照片下方的「移除照片」鍵（僅修改模式）：按下後要再按一次「確定」才真的移除，
+            同時刪除 Storage 裡的對應檔案（檔名規則與上傳一致）。"""
+            if db_idx is None:
+                return
+            flag = f"confirm_rm_{tag}_{loop_idx}_{db_idx}"
+            if not st.session_state.get(flag):
+                if st.button("🗑️ 移除照片", key=f"rm_{tag}_{loop_idx}_{db_idx}", use_container_width=True):
+                    st.session_state[flag] = True
+                    _rerun_detail()
+            else:
+                st.warning("確定移除這張照片？")
+                c_yes, c_no = st.columns(2)
+                with c_yes:
+                    if st.button("確定", key=f"rm_yes_{tag}_{loop_idx}_{db_idx}", type="primary", use_container_width=True):
+                        rec = st.session_state["db"][db_idx]
+                        code = str(rec.get("設備編號") or f"NOID_{db_idx}").strip() or f"NOID_{db_idx}"
+                        rec[photo_key] = None
+                        save_json(st.session_state["db"])
+                        cloud = ""
+                        sb = get_supabase_client()
+                        if sb:
+                            cloud = "，雲端檔案已刪除" if _sb_delete_photo(sb, f"{code}_{suffix}.jpg") else "，雲端檔案刪除失敗或不存在"
+                        log_activity("移除照片", f"{rec.get('設備名稱','')}（{rec.get('設備編號','')}）{photo_key}{cloud}")
+                        st.session_state[rot_key] = 0
+                        st.session_state.pop(flag, None)
+                        _rerun_detail()
+                with c_no:
+                    if st.button("取消", key=f"rm_no_{tag}_{loop_idx}_{db_idx}", use_container_width=True):
+                        st.session_state.pop(flag, None)
+                        _rerun_detail()
+
         def _save_rotated(photo_key, rot_key, d_idx):
             """從資料庫讀原圖 → 旋轉 → 壓縮 → 存回"""
             try:
@@ -1723,6 +1764,7 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                     if st.session_state[rot_key1] != 0 and db_idx is not None:
                         if st.button("💾 儲存旋轉", key=f"sav1_{loop_idx}_{db_idx}", use_container_width=True):
                             _save_rotated("外觀照片", rot_key1, db_idx)
+                    _remove_photo_ui("外觀照片", "appearance", "p1", rot_key1)
             elif _is_admin:
                 st.markdown("""
 <div style='background:#f1f5f9;border:2px dashed #cbd5e1;border-radius:10px;
@@ -1756,6 +1798,7 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                     if st.session_state[rot_key2] != 0 and db_idx is not None:
                         if st.button("💾 儲存旋轉", key=f"sav2_{loop_idx}_{db_idx}", use_container_width=True):
                             _save_rotated("銘牌照片", rot_key2, db_idx)
+                    _remove_photo_ui("銘牌照片", "nameplate", "p2", rot_key2)
             elif _is_admin:
                 st.markdown("""
 <div style='background:#f1f5f9;border:2px dashed #cbd5e1;border-radius:10px;
@@ -1787,6 +1830,7 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                         if st.session_state[rot_key3] != 0 and db_idx is not None:
                             if st.button("💾 儲存旋轉", key=f"sav3_{loop_idx}_{db_idx}", use_container_width=True):
                                 _save_rotated("銘牌照片2", rot_key3, db_idx)
+                        _remove_photo_ui("銘牌照片2", "nameplate2", "p3", rot_key3)
                 elif _is_admin:
                     st.markdown("""
 <div style='background:#f1f5f9;border:2px dashed #cbd5e1;border-radius:10px;
