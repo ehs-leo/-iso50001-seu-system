@@ -1649,7 +1649,15 @@ def _render_equipment_detail(r, db_idx, loop_idx):
         })
         centered_table(info_df, context="equip")
     with col_photo:
-        st.markdown("**📷 設備影像**")
+        # 沒有照片時的呈現規則：只有管理員解鎖後才看得到「尚未上傳」的虛線提示框（知道缺什麼、
+        # 好去補）；一般人看到的畫面不放任何空框或提示，沒有照片的位置直接留白，
+        # 該設備完全沒有照片時連「設備影像」標題也不顯示。
+        _is_admin = bool(st.session_state.get("edit_mode"))
+        _any_photo = bool(r.get("外觀照片") or r.get("銘牌照片") or r.get("銘牌照片2") or (
+            db_idx is not None and any(st.session_state["db"][db_idx].get(k)
+                                       for k in ("外觀照片", "銘牌照片", "銘牌照片2"))))
+        if _is_admin or _any_photo:
+            st.markdown("**📷 設備影像**")
 
         rot_key1 = f"rot_p1_{loop_idx}_{db_idx if db_idx is not None else 0}"
         rot_key2 = f"rot_p2_{loop_idx}_{db_idx if db_idx is not None else 0}"
@@ -1692,9 +1700,10 @@ def _render_equipment_detail(r, db_idx, loop_idx):
             ph1, ph2 = st.columns([1, 2])
 
         with ph1:
-            st.caption("📷 外觀照片（直立）")
             photo1_data = r.get("外觀照片") or (
                 st.session_state["db"][db_idx].get("外觀照片") if db_idx is not None else None)
+            if photo1_data or _is_admin:
+                st.caption("📷 外觀照片（直立）")
             if photo1_data:
                 try:
                     st.image(_photo_display_bytes(photo1_data, st.session_state[rot_key1]),
@@ -1714,7 +1723,7 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                     if st.session_state[rot_key1] != 0 and db_idx is not None:
                         if st.button("💾 儲存旋轉", key=f"sav1_{loop_idx}_{db_idx}", use_container_width=True):
                             _save_rotated("外觀照片", rot_key1, db_idx)
-            else:
+            elif _is_admin:
                 st.markdown("""
 <div style='background:#f1f5f9;border:2px dashed #cbd5e1;border-radius:10px;
             padding:40px 20px;text-align:center;color:#94a3b8;min-height:200px;
@@ -1724,9 +1733,10 @@ def _render_equipment_detail(r, db_idx, loop_idx):
 </div>""", unsafe_allow_html=True)
 
         with ph2:
-            st.caption("🏷️ 銘牌照片（橫式）")
             photo2_data = r.get("銘牌照片") or (
                 st.session_state["db"][db_idx].get("銘牌照片") if db_idx is not None else None)
+            if photo2_data or _is_admin:
+                st.caption("🏷️ 銘牌照片（橫式）")
             if photo2_data:
                 try:
                     st.image(_photo_display_bytes(photo2_data, st.session_state[rot_key2]),
@@ -1746,7 +1756,7 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                     if st.session_state[rot_key2] != 0 and db_idx is not None:
                         if st.button("💾 儲存旋轉", key=f"sav2_{loop_idx}_{db_idx}", use_container_width=True):
                             _save_rotated("銘牌照片", rot_key2, db_idx)
-            else:
+            elif _is_admin:
                 st.markdown("""
 <div style='background:#f1f5f9;border:2px dashed #cbd5e1;border-radius:10px;
             padding:60px 20px;text-align:center;color:#94a3b8;min-height:160px;
@@ -1777,7 +1787,7 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                         if st.session_state[rot_key3] != 0 and db_idx is not None:
                             if st.button("💾 儲存旋轉", key=f"sav3_{loop_idx}_{db_idx}", use_container_width=True):
                                 _save_rotated("銘牌照片2", rot_key3, db_idx)
-                else:
+                elif _is_admin:
                     st.markdown("""
 <div style='background:#f1f5f9;border:2px dashed #cbd5e1;border-radius:10px;
             padding:60px 20px;text-align:center;color:#94a3b8;min-height:160px;
