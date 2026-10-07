@@ -353,9 +353,12 @@ def score_power(kw):
 
 def score_energy_share(kwh, total_kwh):
     """設備耗能估比評分：這台設備的年耗電量佔全廠年總用電的百分比。"""
+    # 級距以原始 Excel「表3-2、優先改善項目鑑別因子」為準（耗能佔比 0～0.05%＝1 分、
+    # 0.06～0.09%＝2、0.1～0.4%＝3、0.5～0.99%＝4、1% 以上＝5；中間的空隙依 Excel 查表邏輯
+    # 歸到各級的下限，也就是 0.06%、0.1%、0.5%、1% 起算）。
     pct = (kwh / total_kwh * 100) if total_kwh else 0
-    if pct < 0.1:   return 1
-    elif pct < 0.2: return 2
+    if pct < 0.06:  return 1
+    elif pct < 0.1: return 2
     elif pct < 0.5: return 3
     elif pct < 1.0: return 4
     else:           return 5
@@ -2485,47 +2488,113 @@ elif "評分標準" in menu:
     </style>
     """, unsafe_allow_html=True)
 
+    # ── 實例演算：拿 app 裡真實的設備，把每一步算給使用者看（數字全部即時取自系統實際計算結果，
+    #    不是寫死的文字，所以設備資料或評分改了，這裡會自動跟著變）。預設用 D-069 烘箱300°C，
+    #    找不到時改用目前評分最高的設備。
+    def _example_equipment():
+        _all = all_calc()
+        _hit = [x for x in _all if str(x.get("設備編號", "")).strip() == "D-069"]
+        if _hit:
+            return _hit[0]
+        return max(_all, key=lambda x: x["_sc"]) if _all else None
+
+    _LBL_KWH = ["< 2,500", "2,500～5,499", "5,500～7,499", "7,500～9,999", "≥ 10,000"]
+    _LBL_KW  = ["< 2.5", "2.5～4.99", "5.0～7.49", "7.5～8.99", "≥ 9.0"]
+    _LBL_AGE = ["0～4 年", "5～9 年", "10～14 年", "15～19 年", "≥ 20 年"]
+    _LBL_HRS = ["0～1,460", "1,461～2,920", "2,921～4,380", "4,381～5,840", "5,841～8,760"]
+
+    def _lbl(labels, score):
+        try:
+            return labels[int(max(1, min(5, round(float(score))))) - 1]
+        except Exception:
+            return "—"
+
+    def _example_card_html(equip, rows, total, passed, hit_text, miss_text):
+        _fs = st.session_state.get("fmt", {}).get("score_table_size", st.session_state.get("font_size", 14))
+        body = "".join(
+            "<div style='display:grid;grid-template-columns:1.5fr 1.6fr .6fr .7fr;gap:6px 12px;"
+            "padding:7px 0;border-bottom:1px solid #eef0f3;align-items:center'>"
+            f"<span>{a}</span><span style='color:#64748b'>{b}</span><span>{c}</span><b style='font-weight:600'>{d}</b></div>"
+            for a, b, c, d in rows)
+        chip = (f"<span style='background:#FAEEDA;color:#633806;border-radius:10px;padding:3px 14px;font-weight:600'>{hit_text}</span>"
+                if passed else
+                f"<span style='background:#F1EFE8;color:#444441;border-radius:10px;padding:3px 14px;font-weight:600'>{miss_text}</span>")
+        return (
+            f"<div style='background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:14px 18px;"
+            f"font-size:{_fs}px;color:#1e293b;margin-bottom:14px'>"
+            f"<div style='font-weight:700;margin-bottom:8px;color:#1a3a5c'>範例設備：{equip.get('設備名稱','')}（{equip.get('設備編號','')}）</div>"
+            "<div style='display:grid;grid-template-columns:1.5fr 1.6fr .6fr .7fr;gap:6px 12px;padding-bottom:4px;"
+            "border-bottom:1px solid #cbd5e1;color:#94a3b8;font-size:0.85em'>"
+            "<span>項目與實際數值</span><span>對照級距 → 分數</span><span>權重</span><span>加權後</span></div>"
+            f"{body}"
+            "<div style='display:flex;justify-content:space-between;align-items:center;margin-top:10px'>"
+            f"<span>合計 <b style='font-weight:700'>{total}</b>（門檻 ≥ 4.0）</span>{chip}</div></div>")
+
+    _ex = _example_equipment()
+    _hl_a = None   # 範例設備在 A 級各因子落在第幾分（用來在矩陣上畫藍框）
+    _hl_i = None   # 同上，I 級
+
+    def _score_matrix_html(factors, cells, highlight=None, ex_name=""):
+        """整合矩陣：列＝分數 1～5，欄＝各鑑別因子（標題帶權重），一張表看完所有級距。
+        highlight 是各因子的得分，對應的格子畫藍框，標出範例設備落在哪一級。"""
+        _fs = st.session_state.get("fmt", {}).get("score_table_size", st.session_state.get("font_size", 14))
+        _th = ("padding:9px 12px;border:1px solid #334155;background:#1a3a5c;color:#fff;"
+               "font-weight:700;text-align:center")
+        head = f"<th style='{_th}'>分數</th>" + "".join(
+            f"<th style='{_th}'>{n}<br><span style='font-weight:500;opacity:.8;font-size:.85em'>權重 {w}</span></th>"
+            for n, w in factors)
+        body = ""
+        for i in range(5):
+            tds = ("<td style='padding:8px 12px;border:1px solid #e2e8f0;font-weight:700;"
+                   f"text-align:center;background:#f8fafc'>{i + 1}</td>")
+            for j, col in enumerate(cells):
+                hit = False
+                if highlight is not None and highlight[j] is not None:
+                    try:
+                        hit = int(round(float(highlight[j]))) == i + 1
+                    except Exception:
+                        hit = False
+                st_ = "padding:8px 12px;border:1px solid #e2e8f0;text-align:center;color:#1e293b;"
+                if hit:
+                    st_ += "background:#E6F1FB;box-shadow:inset 0 0 0 2px #378ADD;font-weight:600;color:#0C447C;"
+                tds += f"<td style='{st_}'>{col[i]}</td>"
+            body += f"<tr>{tds}</tr>"
+        note = (f"<div style='margin-top:6px;font-size:.85em;color:#64748b'>藍框 ＝ 上方範例設備 {ex_name} 所在的級距</div>"
+                if highlight is not None else "")
+        return (f"<div style='overflow-x:auto'><table style='width:100%;border-collapse:collapse;"
+                f"font-size:{_fs}px;font-family:inherit'><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>{note}")
+
     tab1, tab2 = st.tabs(["重大能源使用鑑別（A級）", "優先改善項目鑑別（I級）"])
 
     with tab1:
+        if _ex:
+            st.markdown("#### 📌 用實際設備算一遍")
+            _s_kwh = _ex.get("_xl_seu_kwh_score")
+            if _s_kwh is None: _s_kwh = score_consumption(_ex["_kwh"])
+            _kw = float(_ex.get("消耗功率(kW)") or 0)
+            _s_kw = _ex.get("_xl_seu_kw_score")
+            if _s_kw is None: _s_kw = score_power(_kw)
+            _crit = float(_ex.get("自評重大性") or 3)
+            _hl_a = (_s_kwh, _s_kw, _crit)
+            _rows_a = [
+                (f"年耗電 {_ex['_kwh']:,.0f} kWh", f"{_lbl(_LBL_KWH, _s_kwh)} → {float(_s_kwh):g} 分", "×30%", f"{float(_s_kwh)*0.3:.2f}"),
+                (f"消耗功率 {_kw:g} kW", f"{_lbl(_LBL_KW, _s_kw)} → {float(_s_kw):g} 分", "×40%", f"{float(_s_kw)*0.4:.2f}"),
+                ("工廠自評重大性", f"{_crit:g} 分", "×30%", f"{_crit*0.3:.2f}"),
+            ]
+            st.markdown(_example_card_html(_ex, _rows_a, f"{_ex['_sc']:.1f}", _ex["_seu"] == "A",
+                                           "A 級重大能源使用設備", "一般設備"), unsafe_allow_html=True)
         st.warning(
             "📝 **v2.2 更新：** 這裡的權重與公式已改為和系統實際計算邏輯（`calc_row()`）一致，"
             "新增了原本沒有顯示的「設備功率」評分。"
         )
-        st.markdown("#### 鑑別因子與權重")
-        df_w1 = pd.DataFrame({
-            "鑑別因子": ["設備耗能估比", "設備功率", "工廠自評重大性（設備管控評估）", "總計"],
-            "估比":     ["30%", "40%", "30%", "100%"],
-        })
-        centered_table(df_w1, context="score")
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        col1, col2, col2b = st.columns(3)
-
-        with col1:
-            st.markdown("##### 設備耗能估比評分")
-            df_s1 = pd.DataFrame({
-                "年耗電量(kWh)": ["— ～ 2,499", "2,500 ～ 5,499", "5,500 ～ 7,499", "7,500 ～ 9,999", "10,000 ～"],
-                "分數": [1, 2, 3, 4, 5],
-            })
-            centered_table(df_s1, context="score")
-
-        with col2:
-            st.markdown("##### 設備功率評分")
-            df_s1b = pd.DataFrame({
-                "消耗功率(kW)": ["— ～ 2.49", "2.5 ～ 4.99", "5.0 ～ 7.49", "7.5 ～ 8.99", "9.0 ～"],
-                "分數": [1, 2, 3, 4, 5],
-            })
-            centered_table(df_s1b, context="score")
-
-        with col2b:
-            st.markdown("##### 工廠自評重大性評分")
-            df_s2 = pd.DataFrame({
-                "評估等級": ["— ～ 1", "2 ～ 2", "3 ～ 3", "4 ～ 4", "5 ～ 5"],
-                "說明": ["非重要管控項目", "", "需再評估", "", "既有或應該列入管控"],
-                "分數": [1, 2, 3, 4, 5],
-            })
-            centered_table(df_s2, context="score")
+        st.markdown("#### 評分對照矩陣（鑑別因子、權重與級距）")
+        st.markdown(_score_matrix_html(
+            [("年耗電量 (kWh)", "30%"), ("消耗功率 (kW)", "40%"), ("工廠自評重大性", "30%")],
+            [["— ～ 2,499", "2,500 ～ 5,499", "5,500 ～ 7,499", "7,500 ～ 9,999", "10,000 以上"],
+             ["— ～ 2.49", "2.5 ～ 4.99", "5.0 ～ 7.49", "7.5 ～ 8.99", "9.0 以上"],
+             ["1（非重要管控項目）", "2", "3（需再評估）", "4", "5（既有或應該列入管控）"]],
+            highlight=_hl_a, ex_name=(f"{_ex.get('設備編號','')}" if _ex else "")), unsafe_allow_html=True)
+        st.caption("橫著看：找到各因子落在哪一級，就得到那一列最左邊的分數；三個因子權重合計 100%。")
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("##### 重大能源使用鑑別級距")
@@ -2543,52 +2612,36 @@ elif "評分標準" in menu:
         )
 
     with tab2:
-        st.markdown("#### 鑑別因子與權重")
-        df_w2 = pd.DataFrame({
-            "鑑別因子":     ["設備耗能估比", "設備老舊度", "設備運轉度", "能效改善頻率", "改善執行難易度", "總計"],
-            "估比":         ["15%", "30%", "5%", "20%", "30%", "100%"],
-        })
-        centered_table(df_w2, context="score")
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        col3, col4 = st.columns(2)
-
-        with col3:
-            st.markdown("##### 設備耗能估比評分")
-            df_p1 = pd.DataFrame({
-                "耗能估比範圍": ["0% ～ 0.1%", "0.1% ～ 0.1%", "0.1% ～ 0.4%", "0.5% ～ 1.0%", "1.0% ～"],
-                "分數": [1, 2, 3, 4, 5],
-            })
-            centered_table(df_p1, context="score")
-
-            st.markdown("##### 設備老舊度評分")
-            df_p2 = pd.DataFrame({
-                "使用年數": ["0 ～ 4 年", "5 ～ 9 年", "10 ～ 14 年", "15 ～ 19 年", "20 年以上"],
-                "分數": [1, 2, 3, 4, 5],
-            })
-            centered_table(df_p2, context="score")
-
-            st.markdown("##### 設備運轉度評分")
-            df_p3 = pd.DataFrame({
-                "年運轉時數": ["0 ～ 1,460 小時", "1,461 ～ 2,920 小時", "2,921 ～ 4,380 小時", "4,381 ～ 5,840 小時", "5,841 ～ 8,760 小時"],
-                "分數": [1, 2, 3, 4, 5],
-            })
-            centered_table(df_p3, context="score")
-
-        with col4:
-            st.markdown("##### 能效改善頻率評分")
-            df_p4 = pd.DataFrame({
-                "改善頻率": ["# ～ 1（5年內新機）", "2 ～ 2", "3 ～ 3（10年以上能效改善1次）", "4 ～ 4", "5 ～ 5（10年以上從未改善）"],
-                "分數": [1, 2, 3, 4, 5],
-            })
-            centered_table(df_p4, context="score")
-
-            st.markdown("##### 改善執行難易度評分")
-            df_p5 = pd.DataFrame({
-                "難易度": ["# ～ 1（不會改善）", "2 ～ 2", "3 ～ 3（需再評估）", "4 ～ 4", "5 ～ 5（可立即改善）"],
-                "分數": [1, 2, 3, 4, 5],
-            })
-            centered_table(df_p5, context="score")
+        if _ex:
+            st.markdown("#### 📌 用實際設備算一遍")
+            _pct = (_ex["_kwh"] / TOTAL_KWH * 100) if TOTAL_KWH else 0
+            _age = float(_ex.get("使用年數") or 0)
+            _hrs = float(_ex.get("運轉時數(hr/年)") or 0)
+            _p_share, _p_age, _p_op = _ex.get("耗能估比分數"), _ex.get("老舊度分數"), _ex.get("運轉度分數")
+            _p_freq, _p_diff = _ex.get("改善頻率分數"), _ex.get("改善難易度分數")
+            _f = lambda v: float(v or 0)
+            _hl_i = (_p_share, _p_age, _p_op, _p_freq, _p_diff)
+            _rows_i = [
+                (f"耗能佔全廠用電 {_pct:.2f}%", f"→ {_f(_p_share):g} 分", "×15%", f"{_f(_p_share)*0.15:.2f}"),
+                (f"使用年數 {_age:g} 年", f"{_lbl(_LBL_AGE, _p_age)} → {_f(_p_age):g} 分", "×30%", f"{_f(_p_age)*0.30:.2f}"),
+                (f"年運轉時數 {_hrs:,.0f} hr", f"{_lbl(_LBL_HRS, _p_op)} → {_f(_p_op):g} 分", "×5%", f"{_f(_p_op)*0.05:.2f}"),
+                ("能效改善頻率（自評）", f"{_f(_p_freq):g} 分", "×20%", f"{_f(_p_freq)*0.20:.2f}"),
+                ("改善執行難易度（自評）", f"{_f(_p_diff):g} 分", "×30%", f"{_f(_p_diff)*0.30:.2f}"),
+            ]
+            st.markdown(_example_card_html(_ex, _rows_i, f"{_f(_ex.get('優先改善評分')):.2f}",
+                                           _ex.get("優先改善鑑別") == "I",
+                                           "I 級優先改善項目", "一般設備"), unsafe_allow_html=True)
+        st.markdown("#### 評分對照矩陣（鑑別因子、權重與級距）")
+        st.markdown(_score_matrix_html(
+            [("設備耗能佔比", "15%"), ("設備老舊度", "30%"), ("設備運轉度", "5%"),
+             ("能效改善頻率", "20%"), ("改善執行難易度", "30%")],
+            [["0% ～ 0.05%", "0.06% ～ 0.09%", "0.1% ～ 0.4%", "0.5% ～ 0.99%", "1% 以上"],
+             ["0 ～ 4 年", "5 ～ 9 年", "10 ～ 14 年", "15 ～ 19 年", "20 年以上"],
+             ["0 ～ 1,460 hr", "1,461 ～ 2,920 hr", "2,921 ～ 4,380 hr", "4,381 ～ 5,840 hr", "5,841 ～ 8,760 hr"],
+             ["0 ～ 1（5年內新機）", "2", "3（10年以上能效改善1次）", "4", "5（10年以上從未改善）"],
+             ["0 ～ 1（不會改善）", "2", "3（需再評估）", "4", "5（可立即改善）"]],
+            highlight=_hl_i, ex_name=(f"{_ex.get('設備編號','')}" if _ex else "")), unsafe_allow_html=True)
+        st.caption("橫著看：找到各因子落在哪一級，就得到那一列最左邊的分數；五個因子權重合計 100%。")
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("##### 優先改善項目鑑別級距")
