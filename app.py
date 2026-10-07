@@ -115,6 +115,11 @@ st.markdown("""
   [data-testid="stSidebar"] .stButton button {
     background:#2563a8; color:#fff; border-radius:8px; border:none; width:100%;
   }
+  /* 「永寬能源管理系統」連結按鈕：白底深藍字。上面 [data-testid="stSidebar"] * 會把側邊欄
+     所有文字強制染成淺灰（!important），所以這裡用專屬 key 的選擇器（優先權較高）蓋回去 */
+  .st-key-energy_link_box a { background:#ffffff !important; border:none !important; border-radius:8px; }
+  .st-key-energy_link_box a:hover { background:#e2e8f0 !important; }
+  .st-key-energy_link_box a, .st-key-energy_link_box a * { color:#1a3a5c !important; font-weight:500; }
   .kpi {
     background:#fff; border-radius:12px; padding:14px 10px;
     box-shadow:0 1px 6px rgba(0,0,0,.08); text-align:center;
@@ -1529,8 +1534,9 @@ with st.sidebar:
         base_menu.append("版面格式設定")
     menu = st.radio("", base_menu, label_visibility="collapsed")
 
-    st.link_button("🌡️ 永寬能源管理系統（廠內網路）", _energy_mgmt_url(), use_container_width=True,
-                   help="開啟廠內電表／溫濕度平面圖與歷史資料查詢，需連在廠內網路才能開啟")
+    with st.container(key="energy_link_box"):
+        st.link_button("🌡️ 永寬能源管理系統（廠內網路）", _energy_mgmt_url(), use_container_width=True,
+                       help="開啟廠內電表／溫濕度平面圖與歷史資料查詢，需連在廠內網路才能開啟")
 
     st.divider()
     db_count = len(st.session_state["db"])
