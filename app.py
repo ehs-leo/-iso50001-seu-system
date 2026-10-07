@@ -1554,7 +1554,6 @@ with st.sidebar:
         )
         st.session_state["edit_mode"] = "修改" in mode
     else:
-        st.info("👁️ 唯讀保護中")
         st.session_state["edit_mode"] = False
 
     st.divider()
@@ -1603,9 +1602,7 @@ st.markdown("""
 if st.session_state["edit_mode"]:
     st.markdown('<div class="mode-edit">✏️ <b>修改模式已啟用</b>：可新增設備、編輯數據、上傳照片。</div>',
                 unsafe_allow_html=True)
-else:
-    st.markdown('<div class="mode-view">👁️ <b>唯讀觀看模式</b>：所有編輯功能已鎖定。管理員由左側輸入密碼解鎖。</div>',
-                unsafe_allow_html=True)
+# 唯讀模式不再顯示橫幅（側邊欄的「唯讀保護中」提示也已拿掉）；只有修改模式才顯示上面的警示橫幅。
 st.markdown("")
 
 # ─────────────────────────────────────────────────────────────────────────────
