@@ -1576,6 +1576,14 @@ if not os.path.exists(EXCEL_FILE) and len(st.session_state["db"]) == 0:
 # ─────────────────────────────────────────────────────────────────────────────
 # ── 頁面一：全廠能耗儀表板
 # ─────────────────────────────────────────────────────────────────────────────
+def _rerun_detail():
+    """設備詳情現在放在彈出視窗（fragment）裡：視窗內的操作（旋轉照片、刪除確認…）
+    只重跑視窗本身，視窗才不會被關掉。萬一不是在視窗內被呼叫，退回整頁重跑。"""
+    try:
+        st.rerun(scope="fragment")
+    except Exception:
+        st.rerun()
+
 def _render_equipment_detail(r, db_idx, loop_idx):
     d1, d2, d3, d4 = st.columns(4)
     d1.metric("消耗功率",   f"{r.get('消耗功率(kW)','')} kW")
@@ -1630,7 +1638,7 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                 save_json(st.session_state["db"])
                 st.session_state[rot_key] = 0
                 st.success(f"✅ {photo_key}已儲存！")
-                st.rerun()
+                _rerun_detail()
             except Exception as e:
                 st.error(f"儲存失敗：{e}")
 
@@ -1663,11 +1671,11 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                     with rc1a:
                         if st.button("↺ 逆時針", key=f"ccw1_{loop_idx}_{db_idx}", use_container_width=True):
                             st.session_state[rot_key1] = (st.session_state[rot_key1] - 90) % 360
-                            st.rerun()
+                            _rerun_detail()
                     with rc1b:
                         if st.button("↻ 順時針", key=f"cw1_{loop_idx}_{db_idx}", use_container_width=True):
                             st.session_state[rot_key1] = (st.session_state[rot_key1] + 90) % 360
-                            st.rerun()
+                            _rerun_detail()
                     if st.session_state[rot_key1] != 0 and db_idx is not None:
                         if st.button("💾 儲存旋轉", key=f"sav1_{loop_idx}_{db_idx}", use_container_width=True):
                             _save_rotated("外觀照片", rot_key1, db_idx)
@@ -1698,11 +1706,11 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                     with rc2a:
                         if st.button("↺ 逆時針", key=f"ccw2_{loop_idx}_{db_idx}", use_container_width=True):
                             st.session_state[rot_key2] = (st.session_state[rot_key2] - 90) % 360
-                            st.rerun()
+                            _rerun_detail()
                     with rc2b:
                         if st.button("↻ 順時針", key=f"cw2_{loop_idx}_{db_idx}", use_container_width=True):
                             st.session_state[rot_key2] = (st.session_state[rot_key2] + 90) % 360
-                            st.rerun()
+                            _rerun_detail()
                     if st.session_state[rot_key2] != 0 and db_idx is not None:
                         if st.button("💾 儲存旋轉", key=f"sav2_{loop_idx}_{db_idx}", use_container_width=True):
                             _save_rotated("銘牌照片", rot_key2, db_idx)
@@ -1732,11 +1740,11 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                         with rc3a:
                             if st.button("↺ 逆時針", key=f"ccw3_{loop_idx}_{db_idx}", use_container_width=True):
                                 st.session_state[rot_key3] = (st.session_state[rot_key3] - 90) % 360
-                                st.rerun()
+                                _rerun_detail()
                         with rc3b:
                             if st.button("↻ 順時針", key=f"cw3_{loop_idx}_{db_idx}", use_container_width=True):
                                 st.session_state[rot_key3] = (st.session_state[rot_key3] + 90) % 360
-                                st.rerun()
+                                _rerun_detail()
                         if st.session_state[rot_key3] != 0 and db_idx is not None:
                             if st.button("💾 儲存旋轉", key=f"sav3_{loop_idx}_{db_idx}", use_container_width=True):
                                 _save_rotated("銘牌照片2", rot_key3, db_idx)
@@ -1859,7 +1867,7 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                 st.rerun()
             if del_ok:
                 st.session_state[f"confirm_del_{loop_idx}_{db_idx}"] = True
-                st.rerun()
+                _rerun_detail()
 
         if st.session_state.get(f"confirm_del_{loop_idx}_{db_idx}"):
             st.error(f"⚠️ 確定要刪除「{cur.get('設備名稱','') }」（{cur.get('設備編號','')}）嗎？此操作無法復原。")
@@ -1875,7 +1883,7 @@ def _render_equipment_detail(r, db_idx, loop_idx):
             with cc2:
                 if st.button("取消", key=f"confirm_no_{loop_idx}_{db_idx}", use_container_width=True):
                     del st.session_state[f"confirm_del_{loop_idx}_{db_idx}"]
-                    st.rerun()
+                    _rerun_detail()
 
 
 if "儀表板" in menu:
@@ -2229,7 +2237,7 @@ elif "設備盤查" in menu:
     PAGE_SIZE = 20  # 每頁最多顯示幾台設備，避免一次把上百個展開卡片（含照片）全部畫出來
 
     def _equipment_table_view(items, start, key_prefix, show_system=False):
-        """設備清單改用「表格＋點選設備名稱看詳情」：
+        """設備清單改用「表格＋點選設備名稱彈出詳情視窗」：
         一頁 20 台用一張表格一次呈現（可點欄位標題排序），只有被點選的那一台才會
         去渲染詳情與解碼照片，比 20 個展開列輕很多。照片有無欄位只在管理員解鎖後顯示。"""
         import hashlib
@@ -2286,20 +2294,33 @@ elif "設備盤查" in menu:
         event = st.dataframe(
             df, hide_index=True, use_container_width=True,
             on_select="rerun", selection_mode="single-cell",
-            key=f"tbl_{key_prefix}_{sig}",
+            key=f"tbl_{key_prefix}_{sig}_{st.session_state.get('_tbl_reset', 0)}",
             height=min(38 * (len(df) + 1) + 3, 38 * 11 + 3),
             column_config=_col_cfg,
         )
-        # 單格選取：點表格內任何一格（例如設備名稱）就算選到那一列。
-        # cells 是 [(列號, 欄位名稱)]，single-cell 模式下最多一筆；點欄位標題仍是排序。
+        # 單格選取：點表格內任何一格（例如設備名稱）就彈出該設備的詳情視窗。
+        # cells 是 [(列號, 欄位名稱)]；點欄位標題仍是排序。
         _cells = event.selection.cells if event and event.selection else []
         sel_row = _cells[0][0] if _cells else None
         if sel_row is not None and 0 <= sel_row < len(items):
-            r = items[sel_row]
-            st.markdown(f"##### 📋 {r.get('設備名稱','')}（{r.get('設備編號','')}）")
-            _render_equipment_detail(r, get_db_idx(r), start + sel_row)
+            r0 = items[sel_row]
+            idx0 = start + sel_row
+            # 開窗的同時把表格的 key 換新（下一次重跑時選取狀態歸零），
+            # 這樣關掉視窗後，同一格可以再點一次重新開窗。
+            st.session_state["_tbl_reset"] = st.session_state.get("_tbl_reset", 0) + 1
+
+            @st.dialog(f"📋 {r0.get('設備名稱','')}（{r0.get('設備編號','')}）", width="large", on_dismiss="rerun")
+            def _detail_dialog():
+                # 視窗內的操作只會重跑視窗本身，所以每次都從資料庫抓最新的一份，
+                # 避免旋轉照片後還顯示開窗當下的舊照片。
+                d_idx = get_db_idx(r0)
+                r_live = dict(r0)
+                if d_idx is not None:
+                    r_live.update(st.session_state["db"][d_idx])
+                _render_equipment_detail(r_live, d_idx, idx0)
+            _detail_dialog()
         else:
-            st.caption("👆 點選表格裡的設備名稱（或任一格），下方會顯示該設備的詳情與照片")
+            st.caption("👆 點選表格裡的設備名稱（或任一格），會彈出該設備的詳情與照片視窗")
 
     if kw_f:
         # ── 搜尋模式
