@@ -1503,27 +1503,10 @@ def all_calc():
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
-# 廠內「永寬化學-能源管理系統」（電表／溫濕度平面圖、歷史資料查詢）。這是內網位址，
+# 廠內「永寬化學-能源管理系統」（DIAEnergie：電表／溫濕度平面圖、歷史資料查詢）。這是內網位址，
 # 只有連在廠內網路的電腦點得開；從外網開 app 時點了會連不上，屬正常現象。
+# 該系統是網頁表單登入，無法用網址帶帳密自動登入，所以按鈕只開啟網址，登入請用瀏覽器的儲存密碼。
 ENERGY_MGMT_URL = "http://192.168.1.32/ExePage.aspx"
-
-def _energy_mgmt_url():
-    """回傳要給按鈕用的網址。
-    內網那台是 Basic 驗證（瀏覽器彈出帳密視窗），可以把帳密放進網址免輸入。
-    帳密不寫在程式碼／GitHub 裡，而是放在 Streamlit Secrets（ENERGY_MGMT_USER、
-    ENERGY_MGMT_PASSWORD）；而且只有管理員解鎖後才會帶帳密，沒解鎖或沒設定
-    Secrets 時一律退回不含帳密的普通網址（點開後照舊手動輸入）。"""
-    if not st.session_state.get("logged_in"):
-        return ENERGY_MGMT_URL
-    try:
-        user = st.secrets["ENERGY_MGMT_USER"]
-        pwd  = st.secrets["ENERGY_MGMT_PASSWORD"]
-    except Exception:
-        return ENERGY_MGMT_URL
-    from urllib.parse import quote, urlsplit
-    parts = urlsplit(ENERGY_MGMT_URL)
-    cred = f"{quote(str(user), safe='')}:{quote(str(pwd), safe='')}"
-    return f"{parts.scheme}://{cred}@{parts.netloc}{parts.path}"
 
 with st.sidebar:
     st.markdown("""
@@ -1584,7 +1567,7 @@ with st.sidebar:
     menu = st.radio("", base_menu, label_visibility="collapsed")
 
     with st.container(key="energy_link_box"):
-        st.link_button("🌡️ 永寬能源管理系統（廠內網路）", _energy_mgmt_url(), use_container_width=True,
+        st.link_button("🌡️ 永寬能源管理系統（廠內網路）", ENERGY_MGMT_URL, use_container_width=True,
                        help="開啟廠內電表／溫濕度平面圖與歷史資料查詢，需連在廠內網路才能開啟")
 
     st.divider()
@@ -2336,11 +2319,12 @@ elif "設備盤查" in menu:
         recs = []
         for r in items:
             rec = {}
+            # 資料裡有些名稱前面帶空白（例如「 抽真空攪拌機」），表格會看起來往右縮，顯示前先去掉頭尾空白
             if show_system:
-                rec["系統"] = r.get("系統別", "")
-            rec["設備名稱"] = r.get("設備名稱", "")
-            rec["編號"] = r.get("設備編號", "")
-            rec["部門"] = r.get("設備部門", "")
+                rec["系統"] = str(r.get("系統別", "") or "").strip()
+            rec["設備名稱"] = str(r.get("設備名稱", "") or "").strip()
+            rec["編號"] = str(r.get("設備編號", "") or "").strip()
+            rec["部門"] = str(r.get("設備部門", "") or "").strip()
             rec["年耗電(kWh)"] = int(round(r["_kwh"]))
             # 評分 4.0 以上顯示成淡紅色圓角標籤，其餘維持純數字。圓角標籤靠 MultiselectColumn
             # （Streamlit 1.50 起才有）；版本不夠新時退回一般數字欄，不會報錯。
