@@ -1420,7 +1420,7 @@ if "fmt" not in st.session_state:
         "dash_table_align": "center",
         # 設備盤查：標題(展開卡標題/摘要卡片數字/設備明細數字) / 表格（無圖表）
         "equip_title_size": 14,
-        "equip_table_size":  14,
+        "equip_table_size":  16,
         "equip_table_align":      "center",
         # 評分標準：標題(章節標題) / 表格（無圖表）
         "score_title_size": 18,
@@ -2302,85 +2302,86 @@ elif "設備盤查" in menu:
 
     PAGE_SIZE = 20  # 每頁最多顯示幾台設備，避免一次把上百個展開卡片（含照片）全部畫出來
 
-    # @st.fragment：點表格選設備時，只重跑「表格＋詳情視窗」這一小塊，不用把整頁
+    # @st.fragment：點設備名稱時，只重跑「清單＋詳情視窗」這一小塊，不用把整頁
     # （側邊欄、篩選列、摘要卡片、全部設備重新計分…）整個重跑一遍，點選反應會快很多。
-    # 若部署後發現表格或視窗行為怪怪的，把下面這一行 @st.fragment 刪掉就會退回整頁重跑。
+    # 若部署後發現清單或視窗行為怪怪的，把下面這一行 @st.fragment 刪掉就會退回整頁重跑。
     @st.fragment
     def _equipment_table_view(items, start, key_prefix, show_system=False):
-        """設備清單改用「表格＋點選設備名稱彈出詳情視窗」：
-        一頁 20 台用一張表格一次呈現（可點欄位標題排序），只有被點選的那一台才會
-        去渲染詳情與解碼照片，比 20 個展開列輕很多。照片有無欄位只在管理員解鎖後顯示。"""
-        import hashlib
+        """設備清單：每台設備一排，「設備名稱」本身是按鈕，點了彈出詳情視窗。
+        字體大小與對齊（置中／靠左）受「版面格式設定」的設備盤查表格字體、表格對齊控制；
+        評分 4.0 以上顯示紅色圓角標籤。照片有無欄位只在管理員解鎖後顯示。
+        代價：沒有「點標題排序」，清單順序固定（系統模式為 A 級在前、再依年耗電由大到小）。"""
+        import html as _html
         if not items:
             st.info("沒有符合條件的設備。")
             return
+        _fmt = st.session_state.get("fmt", {})
+        fs = _fmt.get("equip_table_size", st.session_state.get("font_size", 14))
+        align = "center" if _fmt.get("equip_table_align", "center") == "center" else "left"
+        flex = "center" if align == "center" else "flex-start"
         is_admin = st.session_state["edit_mode"]
-        _has_pill = hasattr(st.column_config, "MultiselectColumn")
-        recs = []
-        for r in items:
-            rec = {}
-            # 資料裡有些名稱前面帶空白（例如「 抽真空攪拌機」），表格會看起來往右縮，顯示前先去掉頭尾空白
-            if show_system:
-                rec["系統"] = str(r.get("系統別", "") or "").strip()
-            rec["設備名稱"] = str(r.get("設備名稱", "") or "").strip()
-            rec["編號"] = str(r.get("設備編號", "") or "").strip()
-            rec["部門"] = str(r.get("設備部門", "") or "").strip()
-            rec["年耗電(kWh)"] = int(round(r["_kwh"]))
-            # 評分 4.0 以上顯示成淡紅色圓角標籤，其餘維持純數字。圓角標籤靠 MultiselectColumn
-            # （Streamlit 1.50 起才有）；版本不夠新時退回一般數字欄，不會報錯。
-            rec["評分"] = [f"{r['_sc']:.1f}"] if _has_pill else r["_sc"]
-            rec["A級"] = "⭐ A級" if r["_seu"] == "A" else ""
-            if is_admin:
-                rec["外觀照片"] = "✓" if r.get("外觀照片") else "✗"
-                rec["銘牌照片"] = "✓" if r.get("銘牌照片") else "✗"
-            recs.append(rec)
-        df = pd.DataFrame(recs)
-        # 全部欄位統一靠左對齊（標題與內容同一條線）。alignment 參數較新的版本才有，
-        # 不支援時自動略過，不會報錯。
-        def _aligned(col_cls, **kw):
-            try:
-                return col_cls(alignment="left", **kw)
-            except TypeError:
-                return col_cls(**kw)
-        _col_cfg = {}
-        for _c in df.columns:
-            if _c == "年耗電(kWh)":
-                _col_cfg[_c] = _aligned(st.column_config.NumberColumn, format="%d")
-            elif _c == "評分" and not _has_pill:
-                _col_cfg[_c] = _aligned(st.column_config.NumberColumn, format="%.1f")
-            elif _c != "評分":
-                _col_cfg[_c] = _aligned(st.column_config.TextColumn)
-        if _has_pill:
-            # 標籤底色就是 color 本身，字色由程式依底色亮度自動選黑或白：
-            # 4.0 以上用中紅 #E24B4A（亮度偏低，自動配白字）；其餘用「全透明白」，沒有底色、字是黑色，看起來就是純數字。
-            _opts = sorted({f"{r['_sc']:.1f}" for r in items})
-            _col_cfg["評分"] = st.column_config.MultiselectColumn(
-                "評分", options=_opts, width="small",
-                color=["#E24B4A" if float(o) >= 4.0 else "#FFFFFF00" for o in _opts])
-        # key 帶入本頁設備清單的指紋：換頁、換系統、換篩選條件後，上一次點選的列號
-        # 不會誤指到新清單裡的另一台設備
-        sig = hashlib.md5("|".join(f"{r.get('設備編號','')}{r.get('設備名稱','')}" for r in items).encode()).hexdigest()[:8]
-        # 表格最多顯示約 10 列高度（超過的在表格內捲動），這樣勾選後詳情就出現在同一個畫面內，
-        # 不用先捲過 20 列才看到。
-        event = st.dataframe(
-            df, hide_index=True, use_container_width=True,
-            on_select="rerun", selection_mode="single-cell",
-            key=f"tbl_{key_prefix}_{sig}_{st.session_state.get('_tbl_reset', 0)}",
-            height=min(38 * (len(df) + 1) + 3, 38 * 11 + 3),
-            column_config=_col_cfg,
-        )
-        # 單格選取：點表格內任何一格（例如設備名稱）就彈出該設備的詳情視窗。
-        # cells 是 [(列號, 欄位名稱)]；點欄位標題仍是排序。
-        _cells = event.selection.cells if event and event.selection else []
-        sel_row = _cells[0][0] if _cells else None
-        if sel_row is not None and 0 <= sel_row < len(items):
-            r0 = items[sel_row]
-            idx0 = start + sel_row
-            # 開窗的同時把表格的 key 換新（下一次重跑時選取狀態歸零），
-            # 這樣關掉視窗後，同一格可以再點一次重新開窗。
-            st.session_state["_tbl_reset"] = st.session_state.get("_tbl_reset", 0) + 1
 
-            @st.dialog(f"📋 {r0.get('設備名稱','')}（{r0.get('設備編號','')}）", width="large", on_dismiss="rerun")
+        cols = []
+        if show_system:
+            cols.append(("系統", 1.1))
+        cols += [("設備名稱", 2.3), ("編號", 1.2), ("部門", 1.2), ("年耗電(kWh)", 1.3), ("評分", 0.9), ("A級", 1.0)]
+        if is_admin:
+            cols += [("外觀照片", 1.0), ("銘牌照片", 1.0)]
+        widths = [w for _, w in cols]
+
+        st.markdown(f"""
+        <style>
+        .st-key-eq_tbl [data-testid="stHorizontalBlock"] {{ gap:0 !important; border-bottom:1px solid #e2e8f0; }}
+        .st-key-eq_tbl [data-testid="stColumn"] {{ padding:0 !important; min-width:0 !important; }}
+        .st-key-eq_tbl .eqc {{ font-size:{fs}px; text-align:{align}; padding:8px 10px; color:#1e293b; overflow-wrap:anywhere; }}
+        .st-key-eq_tbl .eqh {{ background:#1a3a5c; color:#fff; font-weight:700; padding:10px; }}
+        .st-key-eq_tbl div[data-testid="stButton"] {{ display:flex; justify-content:{flex}; padding:4px 10px; }}
+        .st-key-eq_tbl div[data-testid="stButton"] button {{
+            border:1px solid #b8b8b2; border-radius:6px; background:#fff; min-height:0; padding:3px 12px; width:auto; }}
+        .st-key-eq_tbl div[data-testid="stButton"] button p {{ font-size:{fs}px !important; color:#0C447C !important; }}
+        .st-key-eq_tbl div[data-testid="stButton"] button:hover {{ background:#eff6ff; border-color:#378ADD; }}
+        </style>
+        """, unsafe_allow_html=True)
+
+        clicked = None
+        with st.container(key="eq_tbl"):
+            head = st.columns(widths, vertical_alignment="center")
+            for ci, (title, _) in enumerate(cols):
+                head[ci].markdown(f"<div class='eqc eqh'>{title}</div>", unsafe_allow_html=True)
+            for li, r in enumerate(items):
+                row = st.columns(widths, vertical_alignment="center")
+                # 資料裡有些名稱前面帶空白（例如「 抽真空攪拌機」），顯示前去掉頭尾空白
+                name = str(r.get("設備名稱", "") or "").strip()
+                for ci, (title, _) in enumerate(cols):
+                    with row[ci]:
+                        if title == "設備名稱":
+                            if st.button(name or "（未命名）", key=f"eqbtn_{key_prefix}_{start + li}"):
+                                clicked = (r, start + li)
+                            continue
+                        if title == "系統":
+                            txt = _html.escape(str(r.get("系統別", "") or "").strip())
+                        elif title == "編號":
+                            txt = _html.escape(str(r.get("設備編號", "") or "").strip())
+                        elif title == "部門":
+                            txt = _html.escape(str(r.get("設備部門", "") or "").strip())
+                        elif title == "年耗電(kWh)":
+                            txt = f"{int(round(r['_kwh'])):d}"
+                        elif title == "評分":
+                            txt = (f"<span style='background:#E24B4A;color:#fff;border-radius:10px;"
+                                   f"padding:1px 10px;font-weight:600'>{r['_sc']:.1f}</span>"
+                                   if r["_sc"] >= 4.0 else f"{r['_sc']:.1f}")
+                        elif title == "A級":
+                            txt = "⭐ A級" if r["_seu"] == "A" else ""
+                        elif title == "外觀照片":
+                            txt = "✓" if r.get("外觀照片") else "✗"
+                        else:
+                            txt = "✓" if r.get("銘牌照片") else "✗"
+                        st.markdown(f"<div class='eqc'>{txt}</div>", unsafe_allow_html=True)
+
+        if clicked:
+            r0, idx0 = clicked
+
+            @st.dialog(f"📋 {str(r0.get('設備名稱','') or '').strip()}（{r0.get('設備編號','')}）", width="large", on_dismiss="rerun")
             def _detail_dialog():
                 # 視窗內的操作只會重跑視窗本身，所以每次都從資料庫抓最新的一份，
                 # 避免旋轉照片後還顯示開窗當下的舊照片。
@@ -2391,7 +2392,7 @@ elif "設備盤查" in menu:
                 _render_equipment_detail(r_live, d_idx, idx0)
             _detail_dialog()
         else:
-            st.caption("👆 點選表格裡的設備名稱（或任一格），會彈出該設備的詳情與照片視窗")
+            st.caption("👆 點設備名稱，會彈出該設備的詳情與照片視窗")
 
     if kw_f:
         # ── 搜尋模式
@@ -3757,7 +3758,7 @@ elif "版面格式" in menu:
             default_fmt = {
                 "dash_title_size": 28, "dash_chart_font_size": 13,
                 "dash_table_size": 14, "dash_table_align": "center",
-                "equip_title_size": 14, "equip_table_size": 14, "equip_table_align": "center",
+                "equip_title_size": 14, "equip_table_size": 16, "equip_table_align": "center",
                 "score_title_size": 18, "score_table_size": 14, "score_table_align": "center",
                 "energy_title_size": 16, "energy_chart_font_size": 13,
                 "energy_table_size": 14, "energy_table_align": "center",
