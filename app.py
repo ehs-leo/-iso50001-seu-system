@@ -192,7 +192,7 @@ st.markdown("""
 # 「窄框 + 確認鍵」共用元件：方框只佔約 1/3 版面寬度，旁邊貼一個確認鍵，
 # 輸入/選擇後要按確認才會真的套用，避免每打一個字、每點一次 +/- 就整頁重跑。
 # ─────────────────────────────────────────────────────────────────────────────
-def narrow_text_with_confirm(label, state_key, key_prefix):
+def narrow_text_with_confirm(label, state_key, key_prefix, help=None):
     """窄版文字輸入框（搜尋用）。回傳目前「已確認」的值。
 
     有個容易踩到的陷阱：使用者把框內文字清空後，如果沒有再按一次「確認」，
@@ -206,7 +206,7 @@ def narrow_text_with_confirm(label, state_key, key_prefix):
     with col:
         ci, cb = st.columns([4, 1])
         with ci:
-            draft = st.text_input(label, value=st.session_state[state_key], key=f"{key_prefix}_draft")
+            draft = st.text_input(label, value=st.session_state[state_key], key=f"{key_prefix}_draft", help=help)
         with cb:
             st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
             if st.button("確認", key=f"{key_prefix}_confirm", use_container_width=True):
@@ -2249,7 +2249,10 @@ elif "設備盤查" in menu:
                         st.rerun()
 
     # ── 搜尋 + 重大性篩選（窄框 + 確認鍵，輸入完按確認才套用）
-    kw_f  = narrow_text_with_confirm("🔍 搜尋設備名稱 / 編號 / 部門（跨系統搜尋）", "kw_f_val", "kw_f")
+    kw_f  = narrow_text_with_confirm(
+        "🔍 搜尋設備名稱 / 編號 / 部門 / 型號說明（跨系統搜尋）", "kw_f_val", "kw_f",
+        help="可用空格分隔多個關鍵字，每個都出現才會列出（例如「烘箱 謙銳」）。"
+             "全形半形、大小寫、空白與符號（- _ / . 等）都不影響，「DV452」可以找到「DV-452」。")
     seu_f = narrow_select_with_confirm("重大性篩選", ["全部", "A 級重大設備", "一般設備"], "seu_f_val", "seu_f")
     # 照片缺漏相關功能（篩選、統計、清單、下載）只在管理員解鎖（修改模式）時顯示；
     # 唯讀模式固定視為「全部」，_photo_match 會直接放行，不影響原本的清單。
@@ -2396,10 +2399,20 @@ elif "設備盤查" in menu:
 
     if kw_f:
         # ── 搜尋模式
+        # 比對欄位：設備名稱、設備編號、設備部門、型號說明（設備型式）。
+        # 比對規則：先把全形轉半形、轉小寫，再拿掉所有空白與符號（- _ / . ° 等，只留文字與數字），
+        # 所以「DV452」「dv-452」「ＤＶ－４５２」都找得到「DV-452」，換行也不影響。
+        # 關鍵字可用空格分成多個，每一個都要出現（AND）。
+        import unicodedata
+        _norm = lambda t: re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", str(t or "")).lower())
+        _terms = [n for n in (_norm(w) for w in unicodedata.normalize("NFKC", kw_f).split()) if n]
+        def _kw_match(r):
+            hay = _norm(f"{r.get('設備名稱','')} {r.get('設備編號','')} {r.get('設備部門','')} {r.get('設備型式','')}")
+            return all(t in hay for t in _terms)
         filtered = [r for r in rows
                     if (seu_f=="全部" or (seu_f=="A 級重大設備" and r["_seu"]=="A") or (seu_f=="一般設備" and r["_seu"]!="A"))
                     and _photo_match(r)
-                    and kw_f.lower() in f"{r.get('設備名稱','')} {r.get('設備編號','')} {r.get('設備部門','')}".lower()]
+                    and _kw_match(r)]
         st.caption(f"搜尋結果：**{len(filtered)}** 筆")
 
         total_pages = max(1, math.ceil(len(filtered) / PAGE_SIZE))
