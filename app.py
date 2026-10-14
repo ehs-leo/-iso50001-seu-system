@@ -109,8 +109,12 @@ def centered_table(df, context="default", max_height=None):
     </style>
     """
     rows_html = ""
+    def _cell(v):
+        # 儲存格文字若含換行或空白行（Excel 儲存格常見），Markdown 會把 HTML 區塊在那裡截斷，
+        # 後半張表就變成原始碼文字。這裡把所有空白與換行壓成單一空格再放進表格。
+        return re.sub(r"\s+", " ", v).strip() if isinstance(v, str) else v
     for _, row in df.iterrows():
-        cells = "".join(f"<td>{v}</td>" for v in row.values)
+        cells = "".join(f"<td>{_cell(v)}</td>" for v in row.values)
         rows_html += f"<tr>{cells}</tr>"
     headers = "".join(f"<th>{col}</th>" for col in df.columns)
     table_html = f"""<table class="ctable"><thead><tr>{headers}</tr></thead><tbody>{rows_html}</tbody></table>"""
@@ -1478,6 +1482,252 @@ if "enb" not in st.session_state:
             save_enb(default_enb)
 st.session_state["enb"].setdefault("equipment", [])   # 舊存檔相容：沒有這個欄位就補空清單
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Excel 匯出：輸出成「重大能源使用設備評估表」的 表4-1～表4-5 版面
+# ─────────────────────────────────────────────────────────────────────────────
+_XL_WIDTH_STD = [5.1, 16.1, 16.7, 17.5, 13.1, 13.0, 11.0, 8.7, 8.1, 7.1, 9.7, 8.1, 7.1, 13.0, 12.0, 8.1, 13.8, 8.5, 9.3, 9.5, 7.8, 6.8, 8.5, 7.3, 8.5, 8.8, 7.1, 7.7, 7.8, 8.5, 13.0, 9.7, 15.5, 26.5, 12.8, 11.3, 22.1]
+_XL_WIDTH_LIT = [6.0, 15.7, 12.5, 10.5, 20.5, 19.1, 11.0, 13.0, 11.0, 8.1, 7.1, 13.0, 10.3, 7.1, 13.0, 13.0, 12.0, 9.1, 11.1, 8.8, 8.1, 13.0, 8.8, 6.1, 8.1, 7.0, 11.1, 11.5, 11.5, 9.1, 8.5, 8.8, 8.5, 9.1, 11.0, 11.1, 9.7, 7.0, 13.0]
+_XL_SHEET_31A = "表3-1a、重大能源使用鑑別因子(電力)"
+_XL_SHEET_32 = "表3-2、優先改善項目鑑別因子"
+_XL_SHEET_5 = "表5、各系統耗能佔比分析(電力)"
+
+def build_assessment_xlsx(records):
+    """把設備資料輸出成與原始評估表一致的 Excel（表4-1～4-5），回傳 .xlsx 的位元組。
+    - 輸入欄位（名稱、功率、負載率、時數…）寫入數值；計算欄位（耗電量、佔比、各項分數、鑑別）
+      寫入與原始評估表相同的公式，並附上 表3-1a、表3-2（查表）與 表5（全廠推算總用電量），
+      所以在 Excel 裡改輸入值，分數會自動重算。
+    - 原始檔的「耗能佔比」公式引用外部活頁簿（過期的分母），這裡改為引用本檔的 表5，
+      「優先改善項目鑑別」也改為引用本檔的 表3-2。
+    - 不含照片。"""
+    import io
+    from datetime import datetime as _dt
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter as L
+
+    thin = Side(style="thin")
+    box = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center = Alignment(horizontal="center", vertical="center")
+    center_wrap = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    f12 = Font(name="Times New Roman", size=12)
+    f12b = Font(name="Times New Roman", size=12, bold=True)
+    fill = lambda rgb: PatternFill("solid", fgColor=rgb)
+
+    wb = Workbook()
+    ws0 = wb.active
+    ws0.title = "匯出說明"
+
+    # ── 表3-1a、表3-2：查表（VLOOKUP 近似比對，以各級「下限」判定，與原始評估表相同）
+    def put(ws, ref, v, font=f12, fmt=None, bold=False, fl=None):
+        c = ws[ref]; c.value = v; c.font = f12b if bold else font
+        c.alignment = center
+        if fmt: c.number_format = fmt
+        if fl: c.fill = fill(fl)
+        return c
+
+    def band_table(ws, r0, title, unit, bands, labels=None, lo_fmt=None, hi_fmt=None):
+        put(ws, f"B{r0-1}", title, bold=True, fl="99CCFF"); put(ws, f"F{r0-1}", "分數", bold=True, fl="99CCFF")
+        for i, (lo, hi, sc) in enumerate(bands):
+            r = r0 + i
+            put(ws, f"B{r}", lo, fmt=lo_fmt); put(ws, f"C{r}", "~")
+            if hi is not None: put(ws, f"D{r}", hi, fmt=hi_fmt)
+            put(ws, f"E{r}", (labels[i] if labels and labels[i] else unit))
+            put(ws, f"F{r}", sc)
+
+    w31 = wb.create_sheet(_XL_SHEET_31A)
+    band_table(w31, 3, "單一設備耗電量", "kWh", [(0, 2499, 1), (2500, 5499, 2), (5500, 7499, 3), (7500, 9999, 4), (10000, None, 5)])
+    band_table(w31, 10, "單一設備消耗功率", "kW", [(0, 2.4, 1), (2.5, 4.9, 2), (5, 7.4, 3), (7.5, 9, 4), (10, None, 5)])
+    band_table(w31, 17, "設備管控評估", "", [(0, 1, 1), (2, 2, 2), (3, 3, 3), (4, 4, 4), (5, 5, 5)],
+               labels=["非重要管控項目", "", "需再評估", "", "既有或應該列入管控"])
+    put(w31, "B23", "重大能源使用鑑別", bold=True, fl="99CCFF"); put(w31, "F23", "級別", bold=True, fl="99CCFF")
+    for i, (lo, hi, tag) in enumerate([(0, 1.9, "-"), (2, 2.9, "-"), (3, 3.9, "-"), (4, 5, "A")]):
+        r = 24 + i
+        put(w31, f"B{r}", lo); put(w31, f"C{r}", "~"); put(w31, f"D{r}", hi); put(w31, f"E{r}", "分"); put(w31, f"F{r}", tag)
+    put(w31, "H2", "鑑別因子", bold=True, fl="99CCFF"); put(w31, "I2", "佔比", bold=True, fl="99CCFF")
+    for r, (n, wgt) in zip((3, 4, 5), [("單一設備耗電量", 0.3), ("單一設備消耗功率", 0.4), ("設備管控評估", 0.3)]):
+        put(w31, f"H{r}", n); put(w31, f"I{r}", wgt, fmt="0%")
+    put(w31, "H6", "總計"); put(w31, "I6", "=SUM(I3:I5)", fmt="0%")
+    put(w31, "H16", "註：管控可為SOP或即時監控")
+    for col, wd in zip("ABCDEFGHI", (8, 16, 5, 9, 18, 8, 3, 18, 8)): w31.column_dimensions[col].width = wd
+
+    w32 = wb.create_sheet(_XL_SHEET_32)
+    band_table(w32, 3, "設備耗能佔比", "", [(0, 0.0005, 1), (0.0006, 0.0009, 2), (0.001, 0.004, 3), (0.005, 0.0099, 4), (0.01, None, 5)],
+               lo_fmt="0.00%", hi_fmt="0.00%")
+    band_table(w32, 10, "設備老舊度", "年", [(0, 4, 1), (5, 9, 2), (10, 14, 3), (15, 19, 4), (20, None, 5)])
+    band_table(w32, 17, "設備運轉度", "小時", [(0, 1460, 1), (1461, 2920, 2), (2921, 4380, 3), (4381, 5840, 4), (5841, 8760, 5)])
+    def band_table_h(ws, r0, title, rows):
+        put(ws, f"H{r0-1}", title, bold=True, fl="99CCFF"); put(ws, f"L{r0-1}", "分數", bold=True, fl="99CCFF")
+        for i, (lo, hi, lab, sc) in enumerate(rows):
+            r = r0 + i
+            put(ws, f"H{r}", lo); put(ws, f"I{r}", "~"); put(ws, f"J{r}", hi); put(ws, f"K{r}", lab); put(ws, f"L{r}", sc)
+    band_table_h(w32, 3, "能效改善頻率", [(0, 1, "5年內新機", 1), (2, 2, "", 2), (3, 3, "10年以上能效改善1次", 3), (4, 4, "", 4), (5, 5, "10年以上從未改善", 5)])
+    band_table_h(w32, 10, "改善執行難易度", [(0, 1, "不會改善", 1), (2, 2, "", 2), (3, 3, "需再評估", 3), (4, 4, "", 4), (5, 5, "可立即改善", 5)])
+    put(w32, "H16", "優先改善項目", bold=True, fl="99CCFF"); put(w32, "L16", "級別", bold=True, fl="99CCFF")
+    for i, (lo, hi, tag) in enumerate([(0, 1.9, "-"), (2, 2.9, "-"), (3, 3.9, "-"), (4, 5, "I")]):
+        r = 17 + i
+        put(w32, f"H{r}", lo); put(w32, f"I{r}", "~"); put(w32, f"J{r}", hi); put(w32, f"K{r}", "分"); put(w32, f"L{r}", tag)
+    put(w32, "N2", "鑑別因子", bold=True, fl="99CCFF"); put(w32, "O2", "佔比", bold=True, fl="99CCFF")
+    for r, (n, wgt) in zip(range(3, 8), [("設備耗能佔比", .15), ("設備老舊度", .3), ("設備運轉度", .05), ("能效改善頻率", .2), ("改善執行難易度", .3)]):
+        put(w32, f"N{r}", n); put(w32, f"O{r}", wgt, fmt="0%")
+    put(w32, "N8", "總計"); put(w32, "O8", "=SUM(O3:O7)", fmt="0%")
+    for col, wd in zip("ABCDEFGHIJKLMNO", (8, 9, 5, 9, 8, 8, 3, 16, 5, 7, 22, 8, 3, 18, 8)): w32.column_dimensions[col].width = wd
+
+    # ── 表4-1～4-5
+    names = list(SYSTEM_SHEETS.items())          # [(系統別, 分頁名稱)]
+    std_hdr = ["設備名稱", "設備編號", "設備型式/說明", "設備\n部門", "所在棟別", "所在樓層", "消耗功率", "設備數量", "負載率",
+               "設備耗電", "運轉時數", "設備年份", "使用年數", "設備耗電量", "耗能佔比", "單一設備耗電量", "能效\n改善頻率",
+               "自評重大性", "改善執行難易度", "單一設備\n耗能量", "單一設備消耗功率", "自評重大性", "重大性\n評分",
+               "重大能源設備鑑別", "設備\n耗能佔比", "設備\n老舊度", "設備\n運轉度", "能效\n改善頻率", "改善執行難易度",
+               "優先改善\n評分", "優先改善項目鑑別", "研提能源管理行動計畫", "制訂能源管理操作規範", "設備管理者",
+               "外包商/\n承攬商", "相關變數"]
+    std_units = {8: "(kW/台)", 9: "(台)", 10: "(%)", 11: "(kW)", 12: "(hr/年)", 13: "(年)", 14: "(年)", 15: "(kWh/年)",
+                 16: "(%)", 17: "(kWh/年)", 18: "(分)", 19: "(分)", 20: "(分)"}     # 欄號（A=1）
+    by_sys = {n: [] for n, _ in names}
+    for rec in records:
+        by_sys.setdefault(rec.get("系統別") if rec.get("系統別") in by_sys else "其他系統", []).append(rec)
+
+    def num(v, default=0.0):
+        try: return float(v)
+        except Exception: return default
+    def txt(v):
+        return " ".join(str(v).split()) if v not in (None, "") else None
+
+    totals = {}                                   # 系統別 -> (分頁名稱, 設備耗電量欄字母)
+    for sysname, sheet in names:
+        lit = sysname == "照明系統"
+        ws = wb.create_sheet(sheet)
+        ws.sheet_properties.tabColor = "FFFF00"
+        hdr = list(std_hdr)
+        units = dict(std_units)
+        if lit:   # 照明分頁多「容量規格」「安定器型式」兩欄，第 6 欄之後整組右移 2 欄
+            hdr[2:3] = ["燈管型式", "容量規格", "安定器型式"]
+            units = {(k + 2 if k >= 8 else k): v for k, v in std_units.items()}
+        off = 2 if lit else 0
+        ncol = len(hdr) + 1                        # 含 A 欄
+        # 欄位字母（原始評估表的位置）
+        C = {k: L(v + off) for k, v in dict(name=2, code=3, typ=4, dept=5, bldg=6, floor=7, kw=8, qty=9, load=10, kwtot=11,
+                                             hrs=12, year=13, age=14, kwh=15, share=16, kwh1=17, freq=18, crit=19, diff=20,
+                                             s_kwh=21, s_kw=22, s_crit=23, score=24, seu=25, p_share=26, p_age=27, p_op=28,
+                                             p_freq=29, p_diff=30, p_score=31, p_tag=32, plan=33, sop=34, mgr=35, contractor=36,
+                                             var=37).items()}
+        if lit:   # 照明分頁：型式欄之後多兩欄，故 部門 起整組 +2；上面 off 已處理，但「名稱、編號、型式」不位移
+            for k in ("name", "code", "typ"):
+                C[k] = L({"name": 2, "code": 3, "typ": 4}[k])
+        # 標題列
+        for ci, h in enumerate(hdr, start=2):
+            col = ("99CCFF" if ci <= 20 + off else "92D050" if ci <= 25 + off else "FFFF00" if ci <= 32 + off else "FF6600")
+            for r in (2, 3):
+                c = ws.cell(r, ci); c.fill = fill(col); c.alignment = center_wrap; c.border = box
+                c.font = Font(name="Times New Roman", size=11 if ci > 32 + off else 12, bold=True)
+            ws.cell(2, ci).value = h
+            if ci in units: ws.cell(3, ci).value = units[ci]
+        ws.merge_cells(start_row=2, start_column=ncol, end_row=3, end_column=ncol)
+        auto_cols = [C[k] for k in ("kwtot", "age", "kwh", "share", "kwh1", "s_kwh", "s_kw", "s_crit", "score", "seu",
+                                    "p_share", "p_age", "p_op", "p_freq", "p_diff", "p_score", "p_tag")]
+        for colL in auto_cols:
+            c = ws[f"{colL}1"]; c.value = "自動計算"; c.fill = fill("FFFF00")
+            c.font = Font(name="Times New Roman", size=12, color="FF0000"); c.alignment = center
+        ws.row_dimensions[1].height = 18.75; ws.row_dimensions[2].height = 68
+        ws.row_dimensions[3].height = 32 if lit else 17
+        widths = _XL_WIDTH_LIT if lit else _XL_WIDTH_STD
+        for ci, wd in enumerate(widths, start=1): ws.column_dimensions[L(ci)].width = wd
+        ws.freeze_panes = "D4"
+
+        recs = by_sys.get(sysname, [])
+        for i, rec in enumerate(recs):
+            r = 4 + i
+            qty = num(rec.get("設備數量"), 1.0) or 1.0
+            year = rec.get("設備年份")
+            try: year = int(float(year))
+            except Exception:
+                age = rec.get("使用年數")
+                try: year = _dt.now().year - int(float(age))
+                except Exception: year = None
+            vals = {
+                C["name"]: txt(rec.get("設備名稱")), C["code"]: txt(rec.get("設備編號")), C["typ"]: txt(rec.get("設備型式")),
+                C["dept"]: txt(rec.get("設備部門")), C["bldg"]: txt(rec.get("所在棟別")), C["floor"]: txt(rec.get("所在樓層")),
+                C["kw"]: num(rec.get("消耗功率(kW)")), C["qty"]: qty, C["load"]: num(rec.get("負載率")),
+                C["hrs"]: num(rec.get("運轉時數(hr/年)")), C["year"]: year,
+                C["freq"]: num(rec.get("能效改善頻率"), 3), C["crit"]: num(rec.get("自評重大性"), 3),
+                C["diff"]: num(rec.get("改善執行難易度"), 3),
+                C["mgr"]: txt(rec.get("設備管理者")), C["contractor"]: txt(rec.get("外包商承攬商")), C["var"]: txt(rec.get("相關變數")),
+            }
+            g = lambda k: f"{C[k]}{r}"
+            f31 = f"'{_XL_SHEET_31A}'"; f32 = f"'{_XL_SHEET_32}'"
+            forms = {
+                C["kwtot"]: f"={g('kw')}*{g('qty')}*{g('load')}",
+                C["age"]: f"=YEAR(TODAY())-{g('year')}" if year is not None else None,
+                C["kwh"]: f"={g('kwtot')}*{g('hrs')}",
+                C["share"]: f"={g('kwh')}/'{_XL_SHEET_5}'!$C$9",
+                C["kwh1"]: f"={g('kwh')}/{g('qty')}",
+                C["s_kwh"]: f"=VLOOKUP({g('kwh1')},{f31}!$B$3:$F$7,5,TRUE)",
+                C["s_kw"]: f"=VLOOKUP({g('kw')},{f31}!$B$10:$F$14,5,TRUE)",
+                C["s_crit"]: f"=VLOOKUP({g('crit')},{f31}!$B$17:$F$21,5,TRUE)",
+                C["score"]: f"={f31}!$I$3*{g('s_kwh')}+{f31}!$I$4*{g('s_kw')}+{f31}!$I$5*{g('s_crit')}",
+                C["seu"]: f"=VLOOKUP({g('score')},{f31}!$B$24:$F$27,5,TRUE)",
+                C["p_share"]: f"=VLOOKUP({g('share')},{f32}!$B$3:$F$7,5,TRUE)",
+                C["p_age"]: f"=VLOOKUP({g('age')},{f32}!$B$10:$F$14,5,TRUE)" if year is not None else None,
+                C["p_op"]: f"=VLOOKUP({g('hrs')},{f32}!$B$17:$F$21,5,TRUE)",
+                C["p_freq"]: f"=VLOOKUP({g('freq')},{f32}!$H$3:$L$7,5,TRUE)",
+                C["p_diff"]: f"=VLOOKUP({g('diff')},{f32}!$H$10:$L$14,5,TRUE)",
+                C["p_score"]: (f"={f32}!$O$3*{g('p_share')}+{f32}!$O$4*{g('p_age')}+{f32}!$O$5*{g('p_op')}"
+                               f"+{f32}!$O$6*{g('p_freq')}+{f32}!$O$7*{g('p_diff')}") if year is not None else None,
+                C["p_tag"]: f"=VLOOKUP({g('p_score')},{f32}!$H$17:$L$20,5,TRUE)" if year is not None else None,
+            }
+            inputs_filled = {C["name"], C["code"], C["typ"], C["dept"], C["bldg"], C["floor"], C["kw"], C["qty"], C["load"],
+                             C["hrs"], C["year"]}
+            fmts = {C["load"]: "0%", C["share"]: "0.00%", C["score"]: "0.0", C["seu"]: "0.0", C["p_score"]: "0.0", C["p_tag"]: "0.0"}
+            fills = {}
+            for k in ("s_kwh", "s_kw", "s_crit", "score"): fills[C[k]] = "EDF7E1"
+            fills[C["seu"]] = "92D050"
+            for k in ("p_share", "p_age", "p_op", "p_freq", "p_diff", "p_score"): fills[C[k]] = "FFFFCC"
+            fills[C["p_tag"]] = "FFFF00"
+            for ci in range(2, ncol + 1):
+                colL = L(ci); c = ws.cell(r, ci)
+                v = vals.get(colL, forms.get(colL))
+                c.value = v
+                c.font = f12; c.border = box
+                c.alignment = center_wrap if colL in (C["dept"], C["qty"], C["hrs"], C["year"], C["kwh"], C["kwh1"], C["kwtot"], C["age"], C["mgr"], C["contractor"], C["var"], C["typ"]) else center
+                if colL in fmts: c.number_format = fmts[colL]
+                if colL in fills: c.fill = fill(fills[colL])
+                elif colL in inputs_filled: c.fill = fill("E2EFDA")
+            ws.row_dimensions[r].height = 18.75
+        last = max(4, 3 + len(recs))
+        ws.auto_filter.ref = f"A2:{L(ncol)}{last}"
+        totals[sysname] = (sheet, C["kwh"], last)
+
+    # ── 表5：各系統推算耗電量與全廠推算總用電量（耗能佔比的分母 C9）
+    w5 = wb.create_sheet(_XL_SHEET_5)
+    put(w5, "B2", "系統別", bold=True, fl="99CCFF"); put(w5, "C2", "推算年耗電量(kWh)", bold=True, fl="99CCFF")
+    put(w5, "D2", "佔全廠比例", bold=True, fl="99CCFF")
+    for i, (sysname, (sheet, kcol, last)) in enumerate(totals.items()):
+        r = 4 + i
+        put(w5, f"B{r}", sysname)
+        put(w5, f"C{r}", f"=SUM('{sheet}'!{kcol}4:{kcol}{max(last, 4)})", fmt="#,##0")
+        put(w5, f"D{r}", f"=IF($C$9=0,0,C{r}/$C$9)", fmt="0.0%")
+    put(w5, "B9", "全廠推算總用電量", bold=True); put(w5, "C9", "=SUM(C4:C8)", fmt="#,##0", bold=True)
+    put(w5, "B11", "說明：這是各系統設備『功率×數量×負載率×運轉時數』的加總；各設備的耗能佔比以它為分母。")
+    w5.column_dimensions["A"].width = 4; w5.column_dimensions["B"].width = 22; w5.column_dimensions["C"].width = 20; w5.column_dimensions["D"].width = 14
+
+    # ── 匯出說明
+    n_all = sum(len(v) for v in by_sys.values())
+    lines = [
+        ("永寬化學 ISO 50001 重大能源使用設備評估表（由系統匯出）", True),
+        (f"匯出時間：{_dt.now():%Y-%m-%d %H:%M}　設備總數：{n_all} 台", False),
+        ("分頁：表3-1a、表3-2（評分查表）、表4-1 到 表4-5（各系統設備）、表5（全廠推算總用電量）。", False),
+        ("輸入欄位（淺綠底）是數值，計算欄位是與原始評估表相同的公式；在 Excel 中修改輸入值，分數會自動重算。", False),
+        ("耗能佔比的分母採用本檔「表5」的全廠推算總用電量（原始檔的公式引用外部活頁簿，數值過期）。", False),
+        ("公式沒有預先算好的快取值：請用 Excel 或 LibreOffice 開啟；部分預覽程式（手機、郵件預覽）可能顯示空白。", False),
+        ("不含設備照片。「研提能源管理行動計畫」「制訂能源管理操作規範」兩欄系統未記錄，輸出為空白。", False),
+    ]
+    for i, (t, b) in enumerate(lines, start=1):
+        c = ws0.cell(i, 1); c.value = t; c.font = Font(name="Times New Roman", size=14 if b else 12, bold=b)
+    ws0.column_dimensions["A"].width = 110
+
+    bio = io.BytesIO(); wb.save(bio)
+    return bio.getvalue()
+
+
 def all_calc():
     rows = []
     seen_keys = set()
@@ -1623,18 +1873,21 @@ def _render_equipment_detail(r, db_idx, loop_idx):
     col_info, col_photo = st.columns([1, 2.5])
     with col_info:
         load_pct = f"{float(r.get('負載率',0))*100:.0f}%" if r.get('負載率') else "—"
+        import html as _h
+        # 使用者輸入的文字先壓掉換行與多餘空白、並跳脫 < > &，避免弄壞下面的 HTML 表格
+        _c = lambda v: _h.escape(" ".join(str(v if v is not None else "—").split())) or "—"
         info_df = pd.DataFrame({
             "欄位": ["部門", "棟別/樓層", "型式說明", "數量", "負載率", "設備年份",
                     "管理者", "外包商", "年耗電量", "SEU 鑑別"],
             "資料": [
-                r.get('設備部門','—'),
-                f"{r.get('所在棟別','—')} / {r.get('所在樓層','—')}",
-                r.get('設備型式','—'),
+                _c(r.get('設備部門','—')),
+                f"{_c(r.get('所在棟別','—'))} / {_c(r.get('所在樓層','—'))}",
+                _c(r.get('設備型式','—')),
                 f"{r.get('設備數量','—')} 台",
                 load_pct,
                 r.get('設備年份','—'),
-                r.get('設備管理者','—'),
-                r.get('外包商承攬商','—'),
+                _c(r.get('設備管理者','—')),
+                _c(r.get('外包商承攬商','—')),
                 f"{r['_kwh']:,.0f} kWh",
                 '⭐ A 級' if r["_seu"]=='A' else '一般設備',
             ],
@@ -2354,7 +2607,7 @@ elif "設備盤查" in menu:
             for li, r in enumerate(items):
                 row = st.columns(widths, vertical_alignment="center")
                 # 資料裡有些名稱前面帶空白（例如「 抽真空攪拌機」），顯示前去掉頭尾空白
-                name = str(r.get("設備名稱", "") or "").strip()
+                name = " ".join(str(r.get("設備名稱", "") or "").split())
                 for ci, (title, _) in enumerate(cols):
                     with row[ci]:
                         if title == "設備名稱":
@@ -2362,11 +2615,11 @@ elif "設備盤查" in menu:
                                 clicked = (r, start + li)
                             continue
                         if title == "系統":
-                            txt = _html.escape(str(r.get("系統別", "") or "").strip())
+                            txt = _html.escape(" ".join(str(r.get("系統別", "") or "").split()))
                         elif title == "編號":
-                            txt = _html.escape(str(r.get("設備編號", "") or "").strip())
+                            txt = _html.escape(" ".join(str(r.get("設備編號", "") or "").split()))
                         elif title == "部門":
-                            txt = _html.escape(str(r.get("設備部門", "") or "").strip())
+                            txt = _html.escape(" ".join(str(r.get("設備部門", "") or "").split()))
                         elif title == "年耗電(kWh)":
                             txt = f"{int(round(r['_kwh'])):d}"
                         elif title == "評分":
@@ -2384,7 +2637,7 @@ elif "設備盤查" in menu:
         if clicked:
             r0, idx0 = clicked
 
-            @st.dialog(f"📋 {str(r0.get('設備名稱','') or '').strip()}（{r0.get('設備編號','')}）", width="large", on_dismiss="rerun")
+            @st.dialog(f"📋 {' '.join(str(r0.get('設備名稱','') or '').split())}（{' '.join(str(r0.get('設備編號','') or '').split())}）", width="large", on_dismiss="rerun")
             def _detail_dialog():
                 # 視窗內的操作只會重跑視窗本身，所以每次都從資料庫抓最新的一份，
                 # 避免旋轉照片後還顯示開窗當下的舊照片。
@@ -2503,6 +2756,22 @@ elif "設備盤查" in menu:
         csv_data = pd.DataFrame([{k:v for k,v in r.items() if k not in _csv_exclude} for r in sl]).to_csv(index=False).encode("utf-8-sig")
         st.download_button(f"⬇️ 匯出 {sn} CSV", csv_data,
             f"SEU_{sn}_{datetime.now().strftime('%Y%m%d')}.csv","text/csv",key=f"dl_{sn}")
+
+        # 評估表 Excel：輸出成與原始「重大能源使用設備評估表」相同的 表4-1～4-5 版面（全部系統、含公式）。
+        # data 傳入函式＝按下去才產生檔案；包在 fragment 裡，下載時不會整頁重跑。
+        @st.fragment
+        def _assessment_xlsx_button():
+            # 先把設備資料的參照存成區域變數：產生檔案的函式是在使用者按下載時才被呼叫，
+            # 那時不一定還在網頁執行緒裡，不能直接讀 st.session_state。
+            _db = st.session_state["db"]
+            st.download_button(
+                "⬇️ 匯出評估表 Excel（表4-1～4-5 格式，全部系統）",
+                data=lambda: build_assessment_xlsx(_db),
+                file_name=f"重大能源使用設備評估表_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_assess_xlsx",
+                help="輸出成與原始評估表相同的版面與公式（不含照片），用 Excel 開啟後分數會自動計算。")
+        _assessment_xlsx_button()
 
 
 
