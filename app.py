@@ -2147,8 +2147,9 @@ def _render_equipment_detail(r, db_idx, loop_idx):
             up2 = st.file_uploader("更新銘牌照片", type=["jpg","jpeg","png"], key=f"u2_{loop_idx}_{db_idx}")
             up2b = st.file_uploader("新增/更新銘牌照片2（選填，第2個馬達名牌）",
                                      type=["jpg","jpeg","png"], key=f"u2b_{loop_idx}_{db_idx}")
-            sv, dl = st.columns([3,1])
+            sv, cp, dl = st.columns([3,2,1])
             with sv: save_ok = st.form_submit_button("💾 儲存變更", use_container_width=True)
+            with cp: copy_ok = st.form_submit_button("📋 複製為新設備", use_container_width=True)
             with dl: del_ok  = st.form_submit_button("🗑️ 刪除", use_container_width=True)
             if save_ok:
                 st.session_state["db"][db_idx].update({
@@ -2187,6 +2188,59 @@ def _render_equipment_detail(r, db_idx, loop_idx):
             if del_ok:
                 st.session_state[f"confirm_del_{loop_idx}_{db_idx}"] = True
                 _rerun_detail()
+            if copy_ok:
+                st.session_state[f"copy_open_{loop_idx}_{db_idx}"] = True
+                _rerun_detail()
+
+        # 複製為新設備：把這台設備的資料原樣複製成新的一台，只需要填新的設備編號，照片選填。
+        # 編號必須唯一（照片檔名用編號命名，重複會互相覆蓋）。
+        _cp_flag = f"copy_open_{loop_idx}_{db_idx}"
+        _cp_done = f"copy_done_{loop_idx}_{db_idx}"
+        _cp_msg = st.session_state.pop(_cp_done, None)      # 成功訊息只顯示一次
+        if _cp_msg:
+            st.success(_cp_msg)
+        if st.session_state.get(_cp_flag):
+            _src_name = " ".join(str(cur.get("設備名稱", "")).split())
+            with st.form(f"cpf_{loop_idx}_{db_idx}"):
+                st.markdown(f"**📋 複製「{_src_name}（{cur.get('設備編號','')}）」為新設備**  \n"
+                            "其他欄位（含評分）原樣帶過去，只需要填新的設備編號；照片選填，也可以建立後再補。")
+                cp_code = st.text_input("新設備編號 *", key=f"cp_code_{loop_idx}_{db_idx}")
+                cp_u1 = st.file_uploader("外觀照片（選填）", type=["jpg","jpeg","png"], key=f"cp_u1_{loop_idx}_{db_idx}")
+                cp_u2 = st.file_uploader("銘牌照片（選填）", type=["jpg","jpeg","png"], key=f"cp_u2_{loop_idx}_{db_idx}")
+                cc_ok, cc_no = st.columns(2)
+                with cc_ok: cp_create = st.form_submit_button("建立", type="primary", use_container_width=True)
+                with cc_no: cp_cancel = st.form_submit_button("取消", use_container_width=True)
+                if cp_cancel:
+                    st.session_state.pop(_cp_flag, None)
+                    _rerun_detail()
+                if cp_create:
+                    code_n = " ".join(str(cp_code or "").split())
+                    existing = {" ".join(str(x.get("設備編號") or "").split()).lower() for x in st.session_state["db"]}
+                    if not code_n:
+                        st.error("請輸入新設備編號。")
+                    elif code_n.lower() in existing:
+                        st.error(f"設備編號「{code_n}」已經存在，請換一個。")
+                    else:
+                        import copy as _copy
+                        new_rec = _copy.deepcopy(st.session_state["db"][db_idx])
+                        new_rec["設備編號"] = code_n
+                        new_rec["外觀照片"] = new_rec["銘牌照片"] = new_rec["銘牌照片2"] = None
+                        cp_msgs = []
+                        if cp_u1:
+                            b64, ok, ck = compress_photo_to_b64(cp_u1)
+                            new_rec["外觀照片"] = b64; cp_msgs.append(f"外觀照片 {ok:,.0f}KB → {ck:,.0f}KB")
+                        if cp_u2:
+                            b64, ok, ck = compress_photo_to_b64(cp_u2)
+                            new_rec["銘牌照片"] = b64; cp_msgs.append(f"銘牌照片 {ok:,.0f}KB → {ck:,.0f}KB")
+                        st.session_state["db"].append(new_rec)
+                        save_json(st.session_state["db"])
+                        log_activity("複製設備", f"{_src_name}（{cur.get('設備編號','')} → {code_n}）"
+                                     + (f"，已壓縮：{'；'.join(cp_msgs)}" if cp_msgs else ""))
+                        st.session_state[_cp_done] = (f"✅ 已建立新設備「{_src_name}（{code_n}）」"
+                                                      + ("；照片：" + "、".join(cp_msgs) if cp_msgs else "；照片可之後在這台設備的編輯表單補上")
+                                                      + "。關閉視窗後清單會更新。")
+                        st.session_state.pop(_cp_flag, None)
+                        _rerun_detail()
 
         if st.session_state.get(f"confirm_del_{loop_idx}_{db_idx}"):
             st.error(f"⚠️ 確定要刪除「{cur.get('設備名稱','') }」（{cur.get('設備編號','')}）嗎？此操作無法復原。")
