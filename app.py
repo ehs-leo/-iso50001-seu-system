@@ -867,11 +867,36 @@ def read_enb_equipment_from_excel():
 # ─────────────────────────────────────────────────────────────────────────────
 _SUPABASE_CLIENT = None
 _SUPABASE_TRIED = False
+_SUPABASE_FAST_CLIENT = None
+_SUPABASE_FAST_TRIED = False
+_SB_FAST_MODE = False      # 啟動載入資料期間為 True：改用「短逾時」的連線，連不上就快速放棄
+_SB_FAST_DEAD = False      # 啟動前的快速檢查發現雲端連不上：啟動期間不再嘗試任何 Supabase 請求
+SB_STARTUP_TIMEOUT_S = 10  # 啟動載入時每個請求最多等幾秒
 
 def get_supabase_client():
     """回傳 Supabase client；沒有設定 Secrets 或連線失敗就回傳 None
-    （呼叫端要自己處理 None 的情況，退回本地檔案）。同一次執行只嘗試建立一次連線。"""
-    global _SUPABASE_CLIENT, _SUPABASE_TRIED
+    （呼叫端要自己處理 None 的情況，退回本地檔案）。同一次執行只嘗試建立一次連線。
+    啟動載入期間（_SB_FAST_MODE）回傳短逾時的連線，避免 Supabase 暫停或網路不通時畫面空白卡很久；
+    上傳、下載按鈕、補回照片等平常操作維持原本的連線與等待時間，不會誤判逾時。"""
+    global _SUPABASE_CLIENT, _SUPABASE_TRIED, _SUPABASE_FAST_CLIENT, _SUPABASE_FAST_TRIED
+    if _SB_FAST_MODE:
+        if _SB_FAST_DEAD:
+            return None
+        if _SUPABASE_FAST_TRIED:
+            return _SUPABASE_FAST_CLIENT
+        _SUPABASE_FAST_TRIED = True
+        try:
+            url = st.secrets["SUPABASE_URL"]
+            key = st.secrets["SUPABASE_SERVICE_KEY"]
+            from supabase import create_client, ClientOptions
+            try:
+                _SUPABASE_FAST_CLIENT = create_client(url, key, options=ClientOptions(
+                    postgrest_client_timeout=SB_STARTUP_TIMEOUT_S, storage_client_timeout=SB_STARTUP_TIMEOUT_S))
+            except TypeError:   # supabase 套件版本不支援這些參數：退回一般連線，功能不受影響
+                _SUPABASE_FAST_CLIENT = create_client(url, key)
+        except Exception:
+            _SUPABASE_FAST_CLIENT = None
+        return _SUPABASE_FAST_CLIENT
     if _SUPABASE_TRIED:
         return _SUPABASE_CLIENT
     _SUPABASE_TRIED = True
@@ -883,6 +908,19 @@ def get_supabase_client():
     except Exception:
         _SUPABASE_CLIENT = None
     return _SUPABASE_CLIENT
+
+def _sb_preflight():
+    """啟動前先用一個很小的請求確認雲端連得上（最多等 SB_STARTUP_TIMEOUT_S 秒）。
+    回傳 None＝正常或根本沒設定 Supabase；否則回傳錯誤說明。
+    這樣連不上時只等一次逾時，不用讓版面設定、設備資料、三項能源基線的下載各等一次。"""
+    sb = get_supabase_client()
+    if not sb:
+        return None
+    try:
+        sb.table("equipment").select("id").limit(1).execute()
+        return None
+    except Exception as e:
+        return f"{type(e).__name__}：{str(e)[:120]}"
 
 SUPABASE_PHOTO_BUCKET = "equipment-photos"
 
@@ -964,7 +1002,10 @@ def pull_equipment_from_supabase():
         if not rows:
             return None, "Supabase 的 equipment 資料表目前是空的"
         records = []
-        for row in rows:
+        jobs = []      # (第幾筆記錄, 欄位名稱, Storage 路徑)
+        photo_cols = (("外觀照片", "appearance_photo_path"), ("銘牌照片", "nameplate_photo_path"),
+                      ("銘牌照片2", "nameplate_photo_path2"))
+        for i, row in enumerate(rows):
             records.append({
                 "系統別": row.get("system_name"), "設備名稱": row.get("equipment_name"),
                 "設備編號": row.get("equipment_code"), "設備型式": row.get("equipment_type"),
@@ -975,10 +1016,38 @@ def pull_equipment_from_supabase():
                 "使用年數": row.get("age_years"), "自評重大性": row.get("criticality"),
                 "設備管理者": row.get("manager"), "外包商承攬商": row.get("contractor"),
                 "相關變數": row.get("related_vars"),
-                "外觀照片": _sb_download_photo(sb, row.get("appearance_photo_path")),
-                "銘牌照片": _sb_download_photo(sb, row.get("nameplate_photo_path")),
-                "銘牌照片2": _sb_download_photo(sb, row.get("nameplate_photo_path2")),
+                "外觀照片": None, "銘牌照片": None, "銘牌照片2": None,
             })
+            for field, col in photo_cols:
+                if row.get(col):
+                    jobs.append((i, field, row.get(col)))
+
+        # 照片 8 條同時下載（原本是一張一張依序下載，張數多時很慢）。
+        # 連續 3 次遇到逾時或連線錯誤就停止其餘下載，避免連不上時一張張等逾時；
+        # 找不到檔案（404）不算連線錯誤，不會中止。
+        if jobs:
+            import threading
+            from concurrent.futures import ThreadPoolExecutor
+            stop = threading.Event()
+            net_errors = []
+            def _fetch(job):
+                if stop.is_set():
+                    return job, None
+                try:
+                    raw = sb.storage.from_(SUPABASE_PHOTO_BUCKET).download(job[2])
+                    return job, base64.b64encode(raw).decode()
+                except Exception as e:
+                    name = type(e).__name__
+                    if any(k in name for k in ("Timeout", "Connect", "Network", "ReadError", "RemoteProtocol")):
+                        net_errors.append(name)
+                        if len(net_errors) >= 3:
+                            stop.set()
+                    return job, None
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                for (i, field, _path), b64 in ex.map(_fetch, jobs):
+                    if b64:
+                        records[i][field] = b64
+        st.session_state["cloud_photo_missing"] = sum(1 for (i, f, _p) in jobs if not records[i][f])
         return records, None
     except Exception as e:
         return None, f"下載失敗：{e}"
@@ -1414,6 +1483,14 @@ if "font_size" not in st.session_state:
 if "table_align" not in st.session_state:
     st.session_state["table_align"] = "center"
 # 各頁面格式設定
+_SB_FAST_MODE = True   # 以下到「能源基線載入完成」之間的 Supabase 請求都使用短逾時連線
+if ("fmt" not in st.session_state or "db" not in st.session_state or "enb" not in st.session_state) and not (
+        os.path.exists(DB_JSON) and os.path.exists(ENB_JSON) and os.path.exists(LAYOUT_JSON)):
+    _pf_err = _sb_preflight()
+    if _pf_err:
+        _SB_FAST_DEAD = True
+        if not os.path.exists(DB_JSON):     # 本地沒有設備存檔，只能靠內建資料 → 要提醒管理員
+            st.session_state["cloud_offline"] = f"下載失敗：{_pf_err}"
 if "fmt" not in st.session_state:
     _saved_layout = load_layout() or pull_layout_from_supabase()
     st.session_state["fmt"] = _saved_layout if _saved_layout else {
@@ -1460,6 +1537,10 @@ if "db" not in st.session_state:
             st.session_state["db"] = from_supabase
             save_json(from_supabase)   # 順便寫回本地，當作這次 session 的快取
         else:
+            # 雲端「連不上」（逾時、Supabase 暫停、網路不通）與「資料表是空的／沒設定」不同：
+            # 前者要提醒管理員目前顯示的是沒有雲端照片的內建資料，不要在這個狀態下編輯或上傳。
+            if _err and str(_err).startswith("下載失敗"):
+                st.session_state["cloud_offline"] = _err
             # 再退回 Excel 或內建示範資料
             builtin = get_builtin_data()
             st.session_state["db"] = builtin if builtin else init_from_excel()
@@ -1481,6 +1562,7 @@ if "enb" not in st.session_state:
         if mu or pl or eq:
             save_enb(default_enb)
 st.session_state["enb"].setdefault("equipment", [])   # 舊存檔相容：沒有這個欄位就補空清單
+_SB_FAST_MODE = False  # 啟動載入結束，之後的 Supabase 操作回到一般連線
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Excel 匯出：輸出成「重大能源使用設備評估表」的 表4-1～表4-5 版面
@@ -1840,6 +1922,16 @@ st.markdown("""
   </p>
 </div>
 """, unsafe_allow_html=True)
+
+if st.session_state.get("logged_in"):
+    if st.session_state.get("cloud_offline"):
+        st.warning("⚠️ **雲端連不上**（逾時、Supabase 暫停或網路問題）：目前顯示的是內建資料，**不含你上傳到雲端的照片與修改**。"
+                   "請先不要編輯，也不要上傳到 Supabase（會把雲端覆蓋成舊資料）。"
+                   "等 Supabase 恢復後，到「從Excel重新載入」頁按「從 Supabase 下載設備資料」，或在 Streamlit 按 Reboot app。\n\n"
+                   f"錯誤訊息：{st.session_state['cloud_offline']}")
+    elif st.session_state.get("cloud_photo_missing"):
+        st.info(f"ℹ️ 有 {st.session_state['cloud_photo_missing']} 張照片沒能從雲端下載（網路逾時或雲端檔案不存在）。"
+                "可到「從Excel重新載入」頁按「從 Storage 依檔名補回照片」。")
 
 if st.session_state["edit_mode"]:
     st.markdown('<div class="mode-edit">✏️ <b>修改模式已啟用</b>：可新增設備、編輯數據、上傳照片。</div>',
@@ -3717,7 +3809,13 @@ elif "Excel" in menu:
             st.markdown("**設備盤查資料（含照片）**")
             c1, c2 = st.columns(2)
             with c1:
-                if st.button("⬆️ 上傳設備資料到 Supabase", use_container_width=True, key="sb_push_equip"):
+                _offline = bool(st.session_state.get("cloud_offline"))
+                _ok_push = True
+                if _offline:
+                    st.warning("目前畫面是「雲端連不上」時載入的內建資料，上傳會把雲端覆蓋成這份舊資料。")
+                    _ok_push = st.checkbox("我確認目前畫面的資料是最新的，仍要上傳", key="sb_push_force")
+                if st.button("⬆️ 上傳設備資料到 Supabase", use_container_width=True, key="sb_push_equip",
+                             disabled=not _ok_push):
                     with st.spinner("上傳中，含照片可能需要一點時間…"):
                         ok, msg = push_equipment_to_supabase(st.session_state["db"])
                     if ok:
@@ -3733,6 +3831,7 @@ elif "Excel" in menu:
                         st.error(f"❌ {err}")
                     else:
                         st.session_state["db"] = data
+                        st.session_state.pop("cloud_offline", None)   # 已成功從雲端取得資料，解除「雲端連不上」狀態
                         save_json(data)
                         log_activity("Supabase下載", f"設備資料：共 {len(data)} 筆")
                         st.success(f"✅ 已下載 {len(data)} 筆設備資料！")
