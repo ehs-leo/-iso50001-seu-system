@@ -2649,8 +2649,8 @@ elif "設備盤查" in menu:
 
     # ── 搜尋 + 重大性篩選（窄框 + 確認鍵，輸入完按確認才套用）
     kw_f  = narrow_text_with_confirm(
-        "🔍 搜尋設備名稱 / 編號 / 部門 / 型號說明（跨系統搜尋）", "kw_f_val", "kw_f",
-        help="可用空格分隔多個關鍵字，每個都出現才會列出（例如「烘箱 謙銳」）。"
+        "🔍 搜尋設備名稱 / 編號 / 部門 / 型號說明 / 所在棟別（跨系統搜尋）", "kw_f_val", "kw_f",
+        help="可用空格分隔多個關鍵字，每個都出現才會列出（例如「烘箱 謙銳」「二廠 烘箱」）。"
              "全形半形、大小寫、空白與符號（- _ / . 等）都不影響，「DV452」可以找到「DV-452」。")
     seu_f = narrow_select_with_confirm("重大性篩選", ["全部", "A 級重大設備", "一般設備"], "seu_f_val", "seu_f")
     # 照片缺漏相關功能（篩選、統計、清單、下載）只在管理員解鎖（修改模式）時顯示；
@@ -2798,7 +2798,7 @@ elif "設備盤查" in menu:
 
     if kw_f:
         # ── 搜尋模式
-        # 比對欄位：設備名稱、設備編號、設備部門、型號說明（設備型式）。
+        # 比對欄位：設備名稱、設備編號、設備部門、型號說明（設備型式）、所在棟別。
         # 比對規則：先把全形轉半形、轉小寫，再拿掉所有空白與符號（- _ / . ° 等，只留文字與數字），
         # 所以「DV452」「dv-452」「ＤＶ－４５２」都找得到「DV-452」，換行也不影響。
         # 關鍵字可用空格分成多個，每一個都要出現（AND）。
@@ -2806,7 +2806,7 @@ elif "設備盤查" in menu:
         _norm = lambda t: re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", str(t or "")).lower())
         _terms = [n for n in (_norm(w) for w in unicodedata.normalize("NFKC", kw_f).split()) if n]
         def _kw_match(r):
-            hay = _norm(f"{r.get('設備名稱','')} {r.get('設備編號','')} {r.get('設備部門','')} {r.get('設備型式','')}")
+            hay = _norm(f"{r.get('設備名稱','')} {r.get('設備編號','')} {r.get('設備部門','')} {r.get('設備型式','')} {r.get('所在棟別','')}")
             return all(t in hay for t in _terms)
         filtered = [r for r in rows
                     if (seu_f=="全部" or (seu_f=="A 級重大設備" and r["_seu"]=="A") or (seu_f=="一般設備" and r["_seu"]!="A"))
