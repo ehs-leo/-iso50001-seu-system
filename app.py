@@ -924,18 +924,32 @@ def _sb_preflight():
 
 SUPABASE_PHOTO_BUCKET = "equipment-photos"
 
-def _sb_upload_photo(sb, b64_str, path):
-    """把 base64 照片上傳到 Storage，回傳存進資料庫欄位用的路徑字串；沒有照片就回傳 None"""
+def _photo_key(code, suffix):
+    """Storage 裡的照片檔名。
+    Supabase Storage 不接受含中文（非 ASCII）或特殊符號的檔名，會回「Invalid key」而上傳失敗；
+    舊版程式把這個錯誤吞掉，資料表的照片路徑就被寫成空白，重新部署後照片就不見了。
+    所以：只由英數字與 . _ - 組成的編號，沿用原本的檔名（既有的雲端檔案不受影響）；
+    含中文或其他符號的編號，改用編號的 UTF-8 十六進位碼：u_<hex>_appearance.jpg。"""
+    code = str(code)
+    base = code if re.fullmatch(r"[A-Za-z0-9._-]+", code) else "u_" + code.encode("utf-8").hex()
+    return f"{base}_{suffix}.jpg"
+
+def _sb_upload_photo_ex(sb, b64_str, path):
+    """把 base64 照片上傳到 Storage，回傳 (存進資料庫欄位用的路徑, 錯誤訊息)；沒有照片回傳 (None, None)。"""
     if not b64_str:
-        return None
+        return None, None
     try:
         raw = base64.b64decode(b64_str)
         sb.storage.from_(SUPABASE_PHOTO_BUCKET).upload(
             path, raw, {"content-type": "image/jpeg", "upsert": "true"}
         )
-        return path
-    except Exception:
-        return None
+        return path, None
+    except Exception as e:
+        return None, f"{type(e).__name__}: {str(e)[:100]}"
+
+def _sb_upload_photo(sb, b64_str, path):
+    """（相容舊呼叫）只回傳路徑，失敗時為 None；需要知道失敗原因請用 _sb_upload_photo_ex"""
+    return _sb_upload_photo_ex(sb, b64_str, path)[0]
 
 def _sb_delete_photo(sb, path):
     """從 Storage 刪除一張照片檔。檔案不存在或失敗都安靜略過，回傳是否成功。
@@ -958,17 +972,43 @@ def _sb_download_photo(sb, path):
 
 # ── 設備盤查資料（equipment 資料表） ────────────────────────────────────────
 def push_equipment_to_supabase(records):
-    """把目前的設備清單（含照片）整批上傳到 Supabase，回傳 (成功與否, 訊息)"""
+    """把目前的設備清單（含照片）整批上傳到 Supabase，回傳 (成功與否, 訊息)。
+    - 照片上傳失敗不再被吞掉：訊息會列出哪幾張失敗與原因，失敗的照片保留雲端原本的路徑，不會被清成空白。
+    - 目前畫面沒有某張照片、但雲端已有路徑時，保留雲端的路徑（例如啟動時照片沒下載完整，不能因此把雲端的照片清掉）。
+      要真的移除照片請用詳情視窗的「移除照片」，它會同時清掉雲端路徑。
+    - 先寫入新資料、成功後才刪除舊資料；中途失敗會把剛寫入的還原，雲端原有資料維持原樣，不會留下空表。"""
     sb = get_supabase_client()
     if not sb:
         return False, "尚未設定 Supabase 連線資訊（SUPABASE_URL／SUPABASE_SERVICE_KEY）"
+    photo_cols = (("外觀照片", "appearance", "appearance_photo_path"), ("銘牌照片", "nameplate", "nameplate_photo_path"),
+                  ("銘牌照片2", "nameplate2", "nameplate_photo_path2"))
     try:
-        rows = []
+        old = sb.table("equipment").select(
+            "id,equipment_code,appearance_photo_path,nameplate_photo_path,nameplate_photo_path2").execute().data or []
+        old_by_code = {}
+        for o in old:
+            old_by_code.setdefault(o.get("equipment_code"), o)
+        old_ids = [o["id"] for o in old if o.get("id") is not None]
+
+        rows, failures = [], []
+        n_up = n_keep = 0
         for i, rec in enumerate(records):
             code = str(rec.get("設備編號") or f"NOID_{i}").strip() or f"NOID_{i}"
-            appearance_path = _sb_upload_photo(sb, rec.get("外觀照片"), f"{code}_appearance.jpg")
-            nameplate_path  = _sb_upload_photo(sb, rec.get("銘牌照片"),  f"{code}_nameplate.jpg")
-            nameplate_path2 = _sb_upload_photo(sb, rec.get("銘牌照片2"), f"{code}_nameplate2.jpg")
+            label = f"{' '.join(str(rec.get('設備名稱') or '').split())}（{code}）"
+            old_row = old_by_code.get(code) or {}
+            paths = {}
+            for field, suffix, col in photo_cols:
+                b64 = rec.get(field)
+                path = None
+                if b64:
+                    path, err = _sb_upload_photo_ex(sb, b64, _photo_key(code, suffix))
+                    if err:
+                        failures.append(f"{label} {field}：{err}")
+                    else:
+                        n_up += 1
+                if path is None and old_row.get(col):      # 沒有照片或上傳失敗 → 保留雲端原本的路徑
+                    path = old_row.get(col); n_keep += 1
+                paths[col] = path
             rows.append({
                 "system_name": rec.get("系統別"), "equipment_name": rec.get("設備名稱"),
                 "equipment_code": code, "equipment_type": rec.get("設備型式"),
@@ -979,15 +1019,33 @@ def push_equipment_to_supabase(records):
                 "install_year": _si(rec.get("設備年份")), "age_years": _si(rec.get("使用年數")),
                 "criticality": _sf(rec.get("自評重大性")), "manager": rec.get("設備管理者"),
                 "contractor": rec.get("外包商承攬商"), "related_vars": rec.get("相關變數"),
-                "appearance_photo_path": appearance_path, "nameplate_photo_path": nameplate_path,
-                "nameplate_photo_path2": nameplate_path2,
+                **paths,
             })
-        # 用「整批清空重寫」而非逐列比對更新，邏輯最單純可靠，335 筆規模也很快
-        sb.table("equipment").delete().neq("id", -1).execute()
-        batch = 100
-        for i in range(0, len(rows), batch):
-            sb.table("equipment").insert(rows[i:i+batch]).execute()
-        return True, f"已上傳 {len(rows)} 筆設備資料到 Supabase"
+
+        inserted_ids = []
+        def _rollback():
+            for j in range(0, len(inserted_ids), 100):
+                try:
+                    sb.table("equipment").delete().in_("id", inserted_ids[j:j+100]).execute()
+                except Exception:
+                    pass
+        try:
+            for i in range(0, len(rows), 100):
+                res = sb.table("equipment").insert(rows[i:i+100]).execute()
+                inserted_ids += [x["id"] for x in (res.data or []) if x.get("id") is not None]
+            for j in range(0, len(old_ids), 100):
+                sb.table("equipment").delete().in_("id", old_ids[j:j+100]).execute()
+        except Exception as e:
+            _rollback()
+            return False, f"上傳失敗，雲端原有資料維持原樣（沒有被刪除）：{e}"
+
+        msg = f"已上傳 {len(rows)} 筆設備資料到 Supabase；照片：新上傳 {n_up} 張"
+        if n_keep:
+            msg += f"、沿用雲端原有 {n_keep} 張"
+        if failures:
+            msg += (f"\n\n⚠️ 有 {len(failures)} 張照片上傳失敗（資料已儲存，失敗的照片請稍後重新上傳）：\n"
+                    + "\n".join(f"- {f}" for f in failures[:8]) + ("\n- …" if len(failures) > 8 else ""))
+        return True, msg
     except Exception as e:
         return False, f"上傳失敗：{e}"
 
@@ -1054,7 +1112,7 @@ def pull_equipment_from_supabase():
 
 def restore_photos_from_storage(records):
     """依檔名把 Storage 裡的照片補回目前的設備清單（只補「目前沒有照片」的欄位，不覆蓋既有照片）。
-    檔名規則與 push_equipment_to_supabase 完全一致：{設備編號}_appearance.jpg／_nameplate.jpg／_nameplate2.jpg。
+    檔名規則與 push_equipment_to_supabase 完全一致（見 _photo_key）：{設備編號}_appearance.jpg／_nameplate.jpg／_nameplate2.jpg；含中文或特殊符號的編號用 u_<hex>_… 檔名。
     不依賴 equipment 資料表，所以即使資料表被清空，只要 Storage 裡還有檔案就救得回來。
     回傳 (各欄位補回張數的 dict，失敗時為 None, 訊息)"""
     sb = get_supabase_client()
@@ -1078,7 +1136,7 @@ def restore_photos_from_storage(records):
     for i, rec in enumerate(records):
         code = str(rec.get("設備編號") or f"NOID_{i}").strip() or f"NOID_{i}"
         for field, suffix in (("外觀照片", "appearance"), ("銘牌照片", "nameplate"), ("銘牌照片2", "nameplate2")):
-            fn = f"{code}_{suffix}.jpg"
+            fn = _photo_key(code, suffix)
             if not rec.get(field) and fn in names:
                 jobs.append((rec, field, fn))
 
@@ -2025,7 +2083,14 @@ def _render_equipment_detail(r, db_idx, loop_idx):
                         cloud = ""
                         sb = get_supabase_client()
                         if sb:
-                            cloud = "，雲端檔案已刪除" if _sb_delete_photo(sb, f"{code}_{suffix}.jpg") else "，雲端檔案刪除失敗或不存在"
+                            cloud = "，雲端檔案已刪除" if _sb_delete_photo(sb, _photo_key(code, suffix)) else "，雲端檔案刪除失敗或不存在"
+                            try:    # 同時清掉雲端資料表裡的照片路徑，否則下次上傳會把舊路徑當成「雲端原有」保留下來
+                                _col = {"外觀照片": "appearance_photo_path", "銘牌照片": "nameplate_photo_path",
+                                        "銘牌照片2": "nameplate_photo_path2"}[photo_key]
+                                sb.table("equipment").update({_col: None}).eq("equipment_code", code).execute()
+                                cloud += "，雲端路徑已清除"
+                            except Exception:
+                                cloud += "，雲端路徑清除失敗（下次上傳前請再確認）"
                         log_activity("移除照片", f"{rec.get('設備名稱','')}（{rec.get('設備編號','')}）{photo_key}{cloud}")
                         st.session_state[rot_key] = 0
                         st.session_state.pop(flag, None)
@@ -3834,8 +3899,8 @@ elif "Excel" in menu:
                     with st.spinner("上傳中，含照片可能需要一點時間…"):
                         ok, msg = push_equipment_to_supabase(st.session_state["db"])
                     if ok:
-                        log_activity("Supabase上傳", f"設備資料：{msg}")
-                        st.success(f"✅ {msg}")
+                        log_activity("Supabase上傳", f"設備資料：{msg.splitlines()[0]}" + ("（有照片上傳失敗）" if "⚠️" in msg else ""))
+                        (st.warning if "⚠️" in msg else st.success)(f"{'⚠️' if '⚠️' in msg else '✅'} {msg}" if "⚠️" not in msg else msg)
                     else:
                         st.error(f"❌ {msg}")
             with c2:
