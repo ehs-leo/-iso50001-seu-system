@@ -2647,12 +2647,23 @@ elif "設備盤查" in menu:
                         st.success(f"✅ 設備【{in_name}】已寫入！" + ("　📷 " + "、".join(photo_msgs) if photo_msgs else ""))
                         st.rerun()
 
-    # ── 搜尋 + 重大性篩選（窄框 + 確認鍵，輸入完按確認才套用）
+    # ── 搜尋 + 設備篩選（窄框 + 確認鍵，輸入完按確認才套用）
     kw_f  = narrow_text_with_confirm(
         "🔍 搜尋設備名稱 / 編號 / 部門 / 型號說明 / 所在棟別（跨系統搜尋）", "kw_f_val", "kw_f",
         help="可用空格分隔多個關鍵字，每個都出現才會列出（例如「烘箱 謙銳」「二廠 烘箱」）。"
              "全形半形、大小寫、空白與符號（- _ / . 等）都不影響，「DV452」可以找到「DV-452」。")
-    seu_f = narrow_select_with_confirm("重大性篩選", ["全部", "A 級重大設備", "一般設備"], "seu_f_val", "seu_f")
+    # 設備篩選：全部／A 級重大設備／五個系統。選系統＝切到該系統（系統模式與卡片連動；搜尋模式只列該系統）。
+    # 點卡片時若下拉目前是某個系統，下拉要跟著換成被點的系統：下拉選單已經建立之後不能再改它的值，
+    # 所以點卡片時先留一個旗標，下一次執行時、在建立下拉選單之前套用。
+    _SEU_OPTIONS = ["全部", "A 級重大設備"] + list(SYSTEM_SHEETS)
+    _sync_to = st.session_state.pop("_seu_f_sync", None)
+    if _sync_to in _SEU_OPTIONS:
+        st.session_state["seu_f_val"] = _sync_to
+        st.session_state["seu_f_draft"] = _sync_to
+    if st.session_state.get("seu_f_val") not in _SEU_OPTIONS:      # 舊的選項值（例如已拿掉的「一般設備」）→ 視為「全部」
+        st.session_state["seu_f_val"] = "全部"
+        st.session_state.pop("seu_f_draft", None)
+    seu_f = narrow_select_with_confirm("設備篩選", _SEU_OPTIONS, "seu_f_val", "seu_f")
     # 照片缺漏相關功能（篩選、統計、清單、下載）只在管理員解鎖（修改模式）時顯示；
     # 唯讀模式固定視為「全部」，_photo_match 會直接放行，不影響原本的清單。
     if st.session_state["edit_mode"]:
@@ -2809,7 +2820,7 @@ elif "設備盤查" in menu:
             hay = _norm(f"{r.get('設備名稱','')} {r.get('設備編號','')} {r.get('設備部門','')} {r.get('設備型式','')} {r.get('所在棟別','')}")
             return all(t in hay for t in _terms)
         filtered = [r for r in rows
-                    if (seu_f=="全部" or (seu_f=="A 級重大設備" and r["_seu"]=="A") or (seu_f=="一般設備" and r["_seu"]!="A"))
+                    if (seu_f=="全部" or (seu_f=="A 級重大設備" and r["_seu"]=="A") or (seu_f in SYSTEM_SHEETS and r.get("系統別")==seu_f))
                     and _photo_match(r)
                     and _kw_match(r)]
         st.caption(f"搜尋結果：**{len(filtered)}** 筆")
@@ -2823,11 +2834,11 @@ elif "設備盤查" in menu:
     else:
         # ── 系統分頁模式
         # 固定先建立全部 5 個系統的卡片位置（即使篩選後某系統 0 筆也保留），
-        # 避免「重大性篩選」切換時卡片數量忽多忽少、版面跟著跳動。
+        # 避免「設備篩選」切換時卡片數量忽多忽少、版面跟著跳動。
+        # 卡片只受「A 級重大設備」影響；下拉選某個系統時，五張卡片仍都保留，只是選中的卡片換成該系統。
         sys_rows = {s: [] for s in SYSTEM_SHEETS}
         for r in rows:
             if seu_f=="A 級重大設備" and r["_seu"]!="A": continue
-            if seu_f=="一般設備" and r["_seu"]=="A": continue
             if not _photo_match(r): continue
             s = r.get("系統別","其他")
             sys_rows.setdefault(s,[]).append(r)
@@ -2838,6 +2849,8 @@ elif "設備盤查" in menu:
         # 效能考量與原本 radio 版本相同：只有被選到的那個系統才會真的被計算與渲染，
         # 其餘系統的設備明細完全不會執行，避免 335 台設備一次全部算完、全部畫出來。
         _ecsz = st.session_state.get("fmt", {}).get("equip_title_size", 14)
+        if seu_f in SYSTEM_SHEETS:                                   # 下拉選了某個系統 → 以它為準
+            st.session_state["equip_sys_selected"] = seu_f
         if st.session_state.get("equip_sys_selected") not in sys_rows:
             st.session_state["equip_sys_selected"] = next(iter(sys_rows))
 
@@ -2874,6 +2887,8 @@ elif "設備盤查" in menu:
                 if card_cols[i].button(label, key=f"sys_card_{sn_i}", use_container_width=True,
                                         type="primary" if is_sel else "secondary"):
                     st.session_state["equip_sys_selected"] = sn_i
+                    if seu_f in SYSTEM_SHEETS:      # 下拉目前是某個系統 → 下拉跟著換成被點的系統
+                        st.session_state["_seu_f_sync"] = sn_i
                     st.rerun()
 
         st.markdown("<br>", unsafe_allow_html=True)
