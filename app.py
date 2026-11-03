@@ -2714,8 +2714,8 @@ elif "設備盤查" in menu:
 
     # ── 搜尋 + 設備篩選（窄框 + 確認鍵，輸入完按確認才套用）
     kw_f  = narrow_text_with_confirm(
-        "🔍 搜尋設備名稱 / 編號 / 部門 / 型號說明 / 所在棟別（跨系統搜尋）", "kw_f_val", "kw_f",
-        help="可用空格分隔多個關鍵字，每個都出現才會列出（例如「烘箱 謙銳」「二廠 烘箱」）。"
+        "🔍 搜尋設備名稱 / 編號 / 部門 / 型號說明 / 所在棟別 / 所在樓層（跨系統搜尋）", "kw_f_val", "kw_f",
+        help="可用空格分隔多個關鍵字，每個都出現才會列出（例如「烘箱 謙銳」「二廠 烘箱」）。棟別與樓層可以連著打（二廠1F）、用空格隔開（二廠 1F），「1樓」等於「1F」。"
              "全形半形、大小寫、空白與符號（- _ / . 等）都不影響，「DV452」可以找到「DV-452」。")
     # 設備篩選：全部／A 級重大設備／五個系統。選系統＝切到該系統（系統模式與卡片連動；搜尋模式只列該系統）。
     # 點卡片時若下拉目前是某個系統，下拉要跟著換成被點的系統：下拉選單已經建立之後不能再改它的值，
@@ -2802,7 +2802,8 @@ elif "設備盤查" in menu:
         cols = []
         if show_system:
             cols.append(("系統", 1.1))
-        cols += [("設備名稱", 2.3), ("編號", 1.2), ("部門", 1.2), ("年耗電(kWh)", 1.3), ("評分", 0.9), ("A級", 1.0)]
+        cols += [("設備名稱", 2.3), ("編號", 1.2), ("部門", 1.2), ("棟別", 0.9), ("樓層", 1.3),
+                 ("年耗電(kWh)", 1.3), ("評分", 0.9), ("A級", 1.0)]
         if is_admin:
             cols += [("外觀照片", 1.0), ("銘牌照片", 1.0)]
         widths = [w for _, w in cols]
@@ -2842,6 +2843,10 @@ elif "設備盤查" in menu:
                             txt = _html.escape(" ".join(str(r.get("設備編號", "") or "").split()))
                         elif title == "部門":
                             txt = _html.escape(" ".join(str(r.get("設備部門", "") or "").split()))
+                        elif title == "棟別":
+                            txt = _html.escape(" ".join(str(r.get("所在棟別", "") or "").split()))
+                        elif title == "樓層":
+                            txt = _html.escape(" ".join(str(r.get("所在樓層", "") or "").split()))
                         elif title == "年耗電(kWh)":
                             txt = f"{int(round(r['_kwh'])):d}"
                         elif title == "評分":
@@ -2874,15 +2879,16 @@ elif "設備盤查" in menu:
 
     if kw_f:
         # ── 搜尋模式
-        # 比對欄位：設備名稱、設備編號、設備部門、型號說明（設備型式）、所在棟別。
+        # 比對欄位：設備名稱、設備編號、設備部門、型號說明（設備型式）、所在棟別、所在樓層（棟別緊接著樓層，所以可以連著打「二廠1F」）。
         # 比對規則：先把全形轉半形、轉小寫，再拿掉所有空白與符號（- _ / . ° 等，只留文字與數字），
         # 所以「DV452」「dv-452」「ＤＶ－４５２」都找得到「DV-452」，換行也不影響。
         # 關鍵字可用空格分成多個，每一個都要出現（AND）。
         import unicodedata
-        _norm = lambda t: re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", str(t or "")).lower())
+        # 「1樓」視同「1F」（數字加樓才轉換，「頂樓」這類不受影響），所以「二廠 1樓」「二廠1F」都找得到二廠 1F 的設備
+        _norm = lambda t: re.sub(r"[\W_]+", "", re.sub(r"(\d+)\s*樓", r"\1F", unicodedata.normalize("NFKC", str(t or ""))).lower())
         _terms = [n for n in (_norm(w) for w in unicodedata.normalize("NFKC", kw_f).split()) if n]
         def _kw_match(r):
-            hay = _norm(f"{r.get('設備名稱','')} {r.get('設備編號','')} {r.get('設備部門','')} {r.get('設備型式','')} {r.get('所在棟別','')}")
+            hay = _norm(f"{r.get('設備名稱','')} {r.get('設備編號','')} {r.get('設備部門','')} {r.get('設備型式','')} {r.get('所在棟別','')} {r.get('所在樓層','')}")
             return all(t in hay for t in _terms)
         filtered = [r for r in rows
                     if (seu_f=="全部" or (seu_f=="A 級重大設備" and r["_seu"]=="A") or (seu_f in SYSTEM_SHEETS and r.get("系統別")==seu_f))
