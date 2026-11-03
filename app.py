@@ -1033,18 +1033,33 @@ def verify_cloud_photos(sb, records):
     except Exception as e:
         return {"confirmed": 0, "missing": [], "error": f"{type(e).__name__}: {str(e)[:100]}"}
 
-def push_equipment_to_supabase(records):
+def push_equipment_to_supabase(records, force=False, progress=None):
     """把目前的設備清單（含照片）整批上傳到 Supabase，回傳 (成功與否, 訊息)。
-    - 照片上傳失敗不再被吞掉：訊息會列出哪幾張失敗與原因，失敗的照片保留雲端原本的路徑，不會被清成空白。
-    - 目前畫面沒有某張照片、但雲端已有路徑時，保留雲端的路徑（例如啟動時照片沒下載完整，不能因此把雲端的照片清掉）。
-      要真的移除照片請用詳情視窗的「移除照片」，它會同時清掉雲端路徑。
-    - 先寫入新資料、成功後才刪除舊資料；中途失敗會把剛寫入的還原，雲端原有資料維持原樣，不會留下空表。"""
+    - 只上傳有變動的照片：上傳前先取得 Storage 的檔案清單（含檔案大小與 ETag＝內容 MD5），
+      雲端已有、且內容與畫面上這張完全一樣的照片直接略過；有變動、雲端沒有或雲端檔案不見的才上傳。
+      清單取不到、或查不到大小與 ETag（無法確定是否一樣）時，一律重傳，寧可慢也不漏。
+      force=True（介面的「強制重傳所有照片」）時不比對，全部重傳。
+    - 要上傳的照片用 8 條同時上傳。progress(階段, 已完成, 總數) 讓介面顯示進度。
+    - 照片上傳失敗不會被吞掉：訊息會列出哪幾張失敗與原因，失敗的照片保留雲端原本的路徑。
+    - 目前畫面沒有某張照片、但雲端已有路徑時，保留雲端的路徑；要真的移除照片請用詳情視窗的「移除照片」。
+    - 先寫入新資料、成功後才刪除舊資料；中途失敗會把剛寫入的還原，雲端原有資料維持原樣。
+    - 完成後回雲端核對照片是否真的都在（見 verify_cloud_photos）。"""
+    import hashlib, time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    t0 = time.perf_counter()
     sb = get_supabase_client()
     if not sb:
         return False, "尚未設定 Supabase 連線資訊（SUPABASE_URL／SUPABASE_SERVICE_KEY）"
+    def _prog(stage, done, total):
+        if progress:
+            try:
+                progress(stage, done, total)
+            except Exception:
+                pass
     photo_cols = (("外觀照片", "appearance", "appearance_photo_path"), ("銘牌照片", "nameplate", "nameplate_photo_path"),
                   ("銘牌照片2", "nameplate2", "nameplate_photo_path2"))
     try:
+        _prog("讀取雲端資料表", 0, 1)
         old = sb.table("equipment").select(
             "id,equipment_code,appearance_photo_path,nameplate_photo_path,nameplate_photo_path2").execute().data or []
         old_by_code = {}
@@ -1052,23 +1067,88 @@ def push_equipment_to_supabase(records):
             old_by_code.setdefault(o.get("equipment_code"), o)
         old_ids = [o["id"] for o in old if o.get("id") is not None]
 
-        rows, failures = [], []
-        n_up = n_keep = 0
+        # ① 雲端 Storage 檔案清單：檔名 → (大小, ETag/MD5)
+        _prog("比對雲端照片", 0, 1)
+        cloud, list_ok = {}, True
+        try:
+            offset = 0
+            while True:
+                batch = sb.storage.from_(SUPABASE_PHOTO_BUCKET).list("", {"limit": 1000, "offset": offset}) or []
+                for x in batch:
+                    if x.get("name"):
+                        meta = x.get("metadata") or {}
+                        size = meta.get("size") if meta.get("size") is not None else meta.get("contentLength")
+                        etag = str(meta.get("eTag") or "").strip('"')
+                        cloud[x["name"]] = (size, etag if re.fullmatch(r"[0-9a-f]{32}", etag) else None)
+                if len(batch) < 1000:
+                    break
+                offset += 1000
+        except Exception:
+            list_ok = False
+        comparable = list_ok and (not cloud or any(v[0] is not None or v[1] for v in cloud.values()))
+
+        # ② 計畫：每個「照片檔」要不要上傳（同一個檔名只處理一次，後面的設備覆蓋前面的，與舊版一致）
+        plan, row_info = {}, []
         for i, rec in enumerate(records):
             code = str(rec.get("設備編號") or f"NOID_{i}").strip() or f"NOID_{i}"
             label = f"{' '.join(str(rec.get('設備名稱') or '').split())}（{code}）"
             old_row = old_by_code.get(code) or {}
-            paths = {}
+            ents = []
             for field, suffix, col in photo_cols:
                 b64 = rec.get(field)
-                path = None
+                key = _photo_key(code, suffix) if b64 else None
+                ents.append((field, col, key))
                 if b64:
-                    path, err = _sb_upload_photo_ex(sb, b64, _photo_key(code, suffix))
-                    if err:
-                        failures.append(f"{label} {field}：{err}")
-                    else:
-                        n_up += 1
-                if path is None and old_row.get(col):      # 沒有照片或上傳失敗 → 保留雲端原本的路徑
+                    plan[key] = {"raw": base64.b64decode(b64), "label": label, "field": field,
+                                 "old_path": old_row.get(col)}
+            row_info.append((rec, code, label, old_row, ents))
+        n_skip = 0
+        todo = []
+        for key, pl in plan.items():
+            same = False
+            c = cloud.get(key)
+            if not force and comparable and c:
+                size, etag = c
+                if etag:
+                    same = hashlib.md5(pl["raw"]).hexdigest() == etag
+                elif size is not None:
+                    same = int(size) == len(pl["raw"])
+            if same:
+                pl["action"] = "skip"; n_skip += 1
+            else:
+                pl["action"] = "upload"
+                pl["repaired"] = bool(pl["old_path"] == key and key not in cloud and list_ok)   # 資料表有路徑、雲端檔案卻不見
+                todo.append(key)
+
+        # ③ 8 條同時上傳需要上傳的照片
+        results = {}
+        total, done = len(todo), 0
+        _prog("上傳照片（有變動 %d 張）" % total, 0, total)
+        def _up(key):
+            try:
+                sb.storage.from_(SUPABASE_PHOTO_BUCKET).upload(
+                    key, plan[key]["raw"], {"content-type": "image/jpeg", "upsert": "true"})
+                return key, None
+            except Exception as e:
+                return key, f"{type(e).__name__}: {str(e)[:100]}"
+        if todo:
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                for f in as_completed([ex.submit(_up, k) for k in todo]):
+                    k, err = f.result()
+                    results[k] = err
+                    done += 1
+                    _prog("上傳照片（有變動 %d 張）" % total, done, total)
+        n_up = sum(1 for k, e in results.items() if e is None)
+        n_repair = sum(1 for k, e in results.items() if e is None and plan[k].get("repaired"))
+        failures = [f"{plan[k]['label']} {plan[k]['field']}：{e}" for k, e in results.items() if e]
+
+        # ④ 組資料表的列：上傳成功或沒變 → 路徑指向檔案；沒有照片或失敗 → 保留雲端原本的路徑
+        rows, n_keep = [], 0
+        for rec, code, label, old_row, ents in row_info:
+            paths = {}
+            for field, col, key in ents:
+                path = key if (key and (plan[key]["action"] == "skip" or results.get(key) is None)) else None
+                if path is None and old_row.get(col):
                     path = old_row.get(col); n_keep += 1
                 paths[col] = path
             rows.append({
@@ -1084,6 +1164,7 @@ def push_equipment_to_supabase(records):
                 **paths,
             })
 
+        _prog("寫入資料表", 0, 1)
         inserted_ids = []
         def _rollback():
             for j in range(0, len(inserted_ids), 100):
@@ -1101,13 +1182,25 @@ def push_equipment_to_supabase(records):
             _rollback()
             return False, f"上傳失敗，雲端原有資料維持原樣（沒有被刪除）：{e}"
 
-        msg = f"已上傳 {len(rows)} 筆設備資料到 Supabase；照片：新上傳 {n_up} 張"
+        if force:
+            photo_sum = f"全部重新上傳 {n_up} 張（強制重傳，8 張同時上傳）"
+        else:
+            photo_sum = f"新上傳 {n_up} 張"
+            if n_repair:
+                photo_sum += f"（其中 {n_repair} 張是雲端檔案不見，已補傳）"
+            photo_sum += f"、雲端已有且沒變 {n_skip} 張（略過）"
         if n_keep:
-            msg += f"、沿用雲端原有 {n_keep} 張"
+            photo_sum += f"、沿用雲端原有 {n_keep} 張"
+        if failures:
+            photo_sum += f"、失敗 {len(failures)} 張"
+        msg = f"已上傳 {len(rows)} 筆設備資料到 Supabase；照片：{photo_sum}"
+        if not force and not comparable and plan:
+            msg += "\n（無法取得雲端檔案清單或內容資訊，已全部重傳）"
         if failures:
             msg += (f"\n\n⚠️ 有 {len(failures)} 張照片上傳失敗（資料已儲存，失敗的照片請稍後重新上傳）：\n"
                     + "\n".join(f"- {f}" for f in failures[:8]) + ("\n- …" if len(failures) > 8 else ""))
         # 上傳完回雲端核對：資料表路徑 ＋ Storage 檔案是否真的都在
+        _prog("雲端確認", 0, 1)
         v = verify_cloud_photos(sb, records)
         if v["error"]:
             msg += f"\n\n（無法回雲端確認照片：{v['error']}）"
@@ -1122,6 +1215,7 @@ def push_equipment_to_supabase(records):
                         + "\n".join(f"- {lab} {fld}：{why}" for lab, fld, why in miss[:10])
                         + ("\n- …" if len(miss) > 10 else "")
                         + "\n這些照片在雲端不存在，請重新上傳該台設備的照片後再按一次上傳")
+        msg += f"\n花了 {time.perf_counter() - t0:.0f} 秒"
         return True, msg
     except Exception as e:
         return False, f"上傳失敗：{e}"
@@ -3999,7 +4093,7 @@ elif "Excel" in menu:
     else:
         st.success("✅ 已連線到 Supabase。")
         st.caption(
-            "「上傳」是把目前畫面上看到的資料（含照片）整批寫進 Supabase，覆蓋雲端原本的內容；"
+            "「上傳」是把目前畫面上看到的資料（含照片）整批寫進 Supabase，覆蓋雲端原本的內容（照片只傳有變動的，沒變的略過）；"
             "「下載」是把 Supabase 裡的資料整批抓回來，覆蓋目前畫面上的內容。"
             "建議規則：**做完一批編輯後上傳一次**；**重新部署或懷疑本地資料被清空時下載一次**。"
             "系統重新啟動、找不到本地存檔時，也會自動嘗試從 Supabase 下載一次。"
@@ -4017,8 +4111,14 @@ elif "Excel" in menu:
                     _ok_push = st.checkbox("我確認目前畫面的資料是最新的，仍要上傳", key="sb_push_force")
                 if st.button("⬆️ 上傳設備資料到 Supabase", use_container_width=True, key="sb_push_equip",
                              disabled=not _ok_push):
-                    with st.spinner("上傳中，含照片可能需要一點時間…"):
-                        ok, msg = push_equipment_to_supabase(st.session_state["db"])
+                    _pb = st.progress(0.0, text="準備上傳…")
+                    def _push_cb(stage, done, total):
+                        # 階段只有一步（total 為 1）時只顯示階段名稱；上傳照片時顯示「已處理 / 總數」
+                        _pb.progress(min(max((done / total) if total else 1.0, 0.0), 1.0),
+                                     text=stage + (f"：{done} / {total}" if total > 1 else ""))
+                    ok, msg = push_equipment_to_supabase(
+                        st.session_state["db"], force=bool(st.session_state.get("sb_push_force_photos")), progress=_push_cb)
+                    _pb.empty()
                     if ok:
                         _vline = next((ln for ln in msg.splitlines() if "雲端已確認" in ln), "")
                         log_activity("Supabase上傳", f"設備資料：{msg.splitlines()[0]}" + ("（有照片上傳失敗）" if "⚠️ 有" in msg else "")
@@ -4030,6 +4130,8 @@ elif "Excel" in menu:
                         (st.warning if "⚠️" in msg else st.success)(f"{'⚠️' if '⚠️' in msg else '✅'} {msg}" if "⚠️" not in msg else msg)
                     else:
                         st.error(f"❌ {msg}")
+                # 平常只傳有變動的照片；懷疑雲端照片有問題（或想全部重新確認一遍）時勾這個，全部重傳
+                st.checkbox("強制重傳所有照片（平常不用勾；懷疑雲端照片有問題時才勾）", key="sb_push_force_photos")
             with c2:
                 if st.button("⬇️ 從 Supabase 下載設備資料", use_container_width=True, key="sb_pull_equip"):
                     with st.spinner("下載中，含照片可能需要一點時間…"):
