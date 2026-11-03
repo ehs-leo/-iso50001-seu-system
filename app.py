@@ -971,6 +971,68 @@ def _sb_download_photo(sb, path):
         return None
 
 # ── 設備盤查資料（equipment 資料表） ────────────────────────────────────────
+def _sync_sigs(records):
+    """設備清單的「同步簽名」：每台設備一個簽名（只含上傳會寫進雲端的欄位與三張照片），
+    用來和「上次與雲端同步時」的簽名比對，算出有幾項修改尚未上傳。照片用 hash 比對，不逐字比較。"""
+    from collections import Counter
+    fields = ("系統別", "設備名稱", "設備編號", "設備型式", "設備部門", "所在棟別", "所在樓層", "消耗功率(kW)", "設備數量",
+              "負載率", "運轉時數(hr/年)", "設備年份", "使用年數", "自評重大性", "設備管理者", "外包商承攬商", "相關變數")
+    def _n(v):
+        if v is None or v == "":
+            return ""
+        try:
+            return f"{float(v):g}"           # 2 與 2.0 視為相同
+        except (TypeError, ValueError):
+            return " ".join(str(v).split())
+    sigs = Counter()
+    for r in records:
+        photos = tuple(hash(r.get(k)) if r.get(k) else 0 for k in ("外觀照片", "銘牌照片", "銘牌照片2"))
+        sigs[tuple(_n(r.get(k)) for k in fields) + photos] += 1
+    return sigs
+
+def _pending_changes(records, synced):
+    """目前畫面與上次雲端同步相比，有幾項設備被新增、修改或刪除；沒有同步基準時回傳 None"""
+    if synced is None:
+        return None
+    cur = _sync_sigs(records)
+    return max(sum((cur - synced).values()), sum((synced - cur).values()))
+
+def verify_cloud_photos(sb, records):
+    """上傳完成後回雲端核對照片：資料表的照片路徑 ＋ Storage 裡的檔案是否都真的存在。
+    以「畫面上有照片」與「雲端資料表有路徑」的聯集為準，逐張檢查。
+    回傳 {"confirmed": 已確認張數, "missing": [(設備, 照片, 原因)], "error": 錯誤訊息或 None}；只檢查檔案存不存在，不下載、不檢查內容。"""
+    try:
+        rows = sb.table("equipment").select(
+            "equipment_code,appearance_photo_path,nameplate_photo_path,nameplate_photo_path2").execute().data or []
+        by_code = {}
+        for o in rows:
+            by_code.setdefault(o.get("equipment_code"), o)
+        names, offset = set(), 0
+        while True:
+            batch = sb.storage.from_(SUPABASE_PHOTO_BUCKET).list("", {"limit": 1000, "offset": offset}) or []
+            names.update(x.get("name") for x in batch if x.get("name"))
+            if len(batch) < 1000:
+                break
+            offset += 1000
+        cols = (("外觀照片", "appearance_photo_path"), ("銘牌照片", "nameplate_photo_path"),
+                ("銘牌照片2", "nameplate_photo_path2"))
+        confirmed, missing = 0, []
+        for i, rec in enumerate(records):
+            code = str(rec.get("設備編號") or f"NOID_{i}").strip() or f"NOID_{i}"
+            row = by_code.get(code) or {}
+            label = f"{' '.join(str(rec.get('設備名稱') or '').split())}（{code}）"
+            for field, col in cols:
+                path = row.get(col)
+                if not rec.get(field) and not path:
+                    continue
+                if path and path in names:
+                    confirmed += 1
+                else:
+                    missing.append((label, field, "雲端資料表沒有這張照片的路徑" if not path else "Storage 裡找不到這個檔案"))
+        return {"confirmed": confirmed, "missing": missing, "error": None}
+    except Exception as e:
+        return {"confirmed": 0, "missing": [], "error": f"{type(e).__name__}: {str(e)[:100]}"}
+
 def push_equipment_to_supabase(records):
     """把目前的設備清單（含照片）整批上傳到 Supabase，回傳 (成功與否, 訊息)。
     - 照片上傳失敗不再被吞掉：訊息會列出哪幾張失敗與原因，失敗的照片保留雲端原本的路徑，不會被清成空白。
@@ -1045,6 +1107,21 @@ def push_equipment_to_supabase(records):
         if failures:
             msg += (f"\n\n⚠️ 有 {len(failures)} 張照片上傳失敗（資料已儲存，失敗的照片請稍後重新上傳）：\n"
                     + "\n".join(f"- {f}" for f in failures[:8]) + ("\n- …" if len(failures) > 8 else ""))
+        # 上傳完回雲端核對：資料表路徑 ＋ Storage 檔案是否真的都在
+        v = verify_cloud_photos(sb, records)
+        if v["error"]:
+            msg += f"\n\n（無法回雲端確認照片：{v['error']}）"
+            st.session_state["cloud_verify"] = None
+        else:
+            n, miss = v["confirmed"], v["missing"]
+            st.session_state["cloud_verify"] = {"confirmed": n, "missing": len(miss)}
+            if not miss:
+                msg += f"\n\n雲端已確認 {n} 張，缺少 0 張"
+            else:
+                msg += (f"\n\n⚠️ 雲端已確認 {n} 張，缺少 {len(miss)} 張：\n"
+                        + "\n".join(f"- {lab} {fld}：{why}" for lab, fld, why in miss[:10])
+                        + ("\n- …" if len(miss) > 10 else "")
+                        + "\n這些照片在雲端不存在，請重新上傳該台設備的照片後再按一次上傳")
         return True, msg
     except Exception as e:
         return False, f"上傳失敗：{e}"
@@ -1587,12 +1664,16 @@ if "db" not in st.session_state:
     saved = load_json()
     if saved:
         st.session_state["db"] = saved
+        st.session_state["data_source"] = "local"        # 本地存檔：不確定上次是否已上傳，沒有同步基準
+        st.session_state["synced_sigs"] = None
     else:
         # 本地檔案不存在（例如剛重新部署過）：先試著從 Supabase 抓回上次的資料，
         # 這是解決「重新部署後照片消失」問題的關鍵一步。
         from_supabase, _err = pull_equipment_from_supabase()
         if from_supabase:
             st.session_state["db"] = from_supabase
+            st.session_state["data_source"] = "cloud"
+            st.session_state["synced_sigs"] = _sync_sigs(from_supabase)
             save_json(from_supabase)   # 順便寫回本地，當作這次 session 的快取
         else:
             # 雲端「連不上」（逾時、Supabase 暫停、網路不通）與「資料表是空的／沒設定」不同：
@@ -1602,6 +1683,8 @@ if "db" not in st.session_state:
             # 再退回 Excel 或內建示範資料
             builtin = get_builtin_data()
             st.session_state["db"] = builtin if builtin else init_from_excel()
+            st.session_state["data_source"] = "builtin" if builtin else "excel"
+            st.session_state["synced_sigs"] = None
 
 if "enb" not in st.session_state:
     saved_enb = load_enb()
@@ -1964,6 +2047,34 @@ with st.sidebar:
     db_count = len(st.session_state["db"])
     st.caption(f"資料庫：{db_count} 台設備")
     st.caption(f"更新：{datetime.now().strftime('%Y/%m/%d %H:%M')}")
+    # 資料來源：畫面上這份資料是從哪裡來的；管理員另外會看到「尚未上傳」與「雲端缺照片」提醒。
+    # 側邊欄在頁面最上面就畫完了，而「上傳／下載」按鈕在頁面後面才執行，所以這一塊畫在一個預留位置裡，
+    # 按鈕執行完會呼叫 _draw_sidebar_status() 重畫，不用等下一次操作才更新。
+    _status_ph = st.empty()
+
+def _draw_sidebar_status():
+    # 整塊狀態只用「一個」markdown 元素畫進預留位置：重畫時新舊元素一對一替換，不會殘留舊的提醒。
+    _src = st.session_state.get("data_source", "local")
+    _lab, _col = {"cloud": ("☁️ 雲端", "#1D9E75"), "local": ("💾 本地存檔", "#BA7517"), "builtin": ("📦 內建資料", "#E24B4A"),
+                  "excel": ("📄 Excel 載入", "#378ADD"), "backup": ("🗂️ 備份還原", "#378ADD")}.get(_src, ("？ 未知", "#888888"))
+    _html = (f"<div style='font-size:13px;color:#cbd9e8;margin:2px 0'>資料來源：<span style='background:{_col};color:#fff;"
+             f"border-radius:10px;padding:1px 8px'>{_lab}</span></div>")
+    if st.session_state.get("logged_in"):
+        _notes = []
+        _pend = _pending_changes(st.session_state["db"], st.session_state.get("synced_sigs"))
+        if _pend is None:
+            _notes.append("尚未與雲端核對" + ("（不確定是否已上傳）" if _src == "local" else ""))
+        elif _pend > 0:
+            _notes.append(f"有修改尚未上傳（{_pend} 項）")
+        _cv = st.session_state.get("cloud_verify")
+        if _cv and _cv.get("missing"):
+            _notes.append(f"雲端缺少 {_cv['missing']} 張照片")
+        for _n in _notes:
+            _html += (f"<div style='background:#BA7517;color:#fff;border-radius:6px;padding:4px 8px;font-size:12px;"
+                      f"margin-top:4px'>🟠 {_n}</div>")
+    _status_ph.markdown(_html, unsafe_allow_html=True)
+
+_draw_sidebar_status()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 7. 頂部標題 + 模式橫幅
@@ -3795,6 +3906,8 @@ elif "Excel" in menu:
         if st.session_state["edit_mode"]:
             if st.button("🔄 載入內建示範資料", type="primary"):
                 st.session_state["db"] = get_builtin_data()
+                st.session_state["data_source"] = "builtin"; st.session_state["synced_sigs"] = None
+                _draw_sidebar_status()
                 save_json(st.session_state["db"])
                 log_activity("重新載入設備資料", f"載入內建示範資料，共 {len(st.session_state['db'])} 筆")
                 st.success(f"✅ 已載入內建資料！共 {len(st.session_state['db'])} 筆。")
@@ -3806,6 +3919,8 @@ elif "Excel" in menu:
         if st.session_state["edit_mode"]:
             if st.button("🔄 確認重新載入 Excel", type="primary"):
                 st.session_state["db"] = init_from_excel()
+                st.session_state["data_source"] = "excel"; st.session_state["synced_sigs"] = None
+                _draw_sidebar_status()
                 save_json(st.session_state["db"])
                 log_activity("重新載入設備資料", f"從 Excel 重新載入，共 {len(st.session_state['db'])} 筆")
                 st.success(f"✅ 已重新載入！共 {len(st.session_state['db'])} 筆。")
@@ -3905,7 +4020,13 @@ elif "Excel" in menu:
                     with st.spinner("上傳中，含照片可能需要一點時間…"):
                         ok, msg = push_equipment_to_supabase(st.session_state["db"])
                     if ok:
-                        log_activity("Supabase上傳", f"設備資料：{msg.splitlines()[0]}" + ("（有照片上傳失敗）" if "⚠️" in msg else ""))
+                        _vline = next((ln for ln in msg.splitlines() if "雲端已確認" in ln), "")
+                        log_activity("Supabase上傳", f"設備資料：{msg.splitlines()[0]}" + ("（有照片上傳失敗）" if "⚠️ 有" in msg else "")
+                                     + (f"；{_vline.replace('⚠️ ', '')}" if _vline else ""))
+                        st.session_state["data_source"] = "cloud"                      # 上傳成功 → 雲端與目前畫面一致
+                        st.session_state["synced_sigs"] = _sync_sigs(st.session_state["db"])
+                        _draw_sidebar_status()
+                        st.session_state.pop("cloud_offline", None)
                         (st.warning if "⚠️" in msg else st.success)(f"{'⚠️' if '⚠️' in msg else '✅'} {msg}" if "⚠️" not in msg else msg)
                     else:
                         st.error(f"❌ {msg}")
@@ -3918,6 +4039,10 @@ elif "Excel" in menu:
                     else:
                         st.session_state["db"] = data
                         st.session_state.pop("cloud_offline", None)   # 已成功從雲端取得資料，解除「雲端連不上」狀態
+                        st.session_state["data_source"] = "cloud"
+                        st.session_state["synced_sigs"] = _sync_sigs(data)
+                        st.session_state["cloud_verify"] = None
+                        _draw_sidebar_status()
                         save_json(data)
                         log_activity("Supabase下載", f"設備資料：共 {len(data)} 筆")
                         st.success(f"✅ 已下載 {len(data)} 筆設備資料！")
@@ -4027,6 +4152,7 @@ elif "Excel" in menu:
                                    f"還原後將**覆蓋目前的 {len(st.session_state['db'])} 筆資料**，此操作無法復原。")
                         if st.button("✅ 確認還原（覆蓋目前資料）", type="primary", use_container_width=True):
                             st.session_state["db"] = restored
+                            st.session_state["data_source"] = "backup"; st.session_state["synced_sigs"] = None
                             save_json(st.session_state["db"])
                             log_activity("還原設備資料庫備份", f"還原 {len(restored)} 筆設備（{r_photo} 筆含照片）")
                             st.success("✅ 已還原！")
