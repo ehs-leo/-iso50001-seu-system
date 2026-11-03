@@ -2991,7 +2991,7 @@ elif "設備盤查" in menu:
     @st.fragment
     def _equipment_table_view(items, start, key_prefix, show_system=False):
         """設備清單：每台設備一排，「設備名稱」本身是按鈕，點了彈出詳情視窗。
-        字體大小與對齊（置中／靠左）受「版面格式設定」的設備盤查表格字體、表格對齊控制；
+        字體大小與對齊（置中／靠左）受「版面格式設定」的設備盤查表格字體、表格對齊控制（名稱按鈕撐滿整格，文字依對齊設定置中或靠左）；
         評分 4.0 以上顯示紅色圓角標籤。照片有無欄位只在管理員解鎖後顯示。
         代價：沒有「點標題排序」，清單順序固定（系統模式為 A 級在前、再依年耗電由大到小）。"""
         import html as _html
@@ -3019,10 +3019,13 @@ elif "設備盤查" in menu:
         .st-key-eq_tbl [data-testid="stColumn"] {{ padding:0 !important; min-width:0 !important; }}
         .st-key-eq_tbl .eqc {{ font-size:{fs}px; text-align:{align}; padding:8px 10px; color:#1e293b; overflow-wrap:anywhere; }}
         .st-key-eq_tbl .eqh {{ background:#1a3a5c; color:#fff; font-weight:700; padding:10px; }}
-        .st-key-eq_tbl div[data-testid="stButton"] {{ display:flex; justify-content:{flex}; padding:4px 10px; }}
+        .st-key-eq_tbl div[data-testid="stButton"] {{ width:100%; padding:4px 10px; }}
         .st-key-eq_tbl div[data-testid="stButton"] button {{
-            border:1px solid #b8b8b2; border-radius:6px; background:#fff; min-height:0; padding:3px 12px; width:auto; }}
-        .st-key-eq_tbl div[data-testid="stButton"] button p {{ font-size:{fs}px !important; color:#0C447C !important; }}
+            border:1px solid #b8b8b2; border-radius:6px; background:#fff; min-height:0; padding:3px 12px;
+            width:100% !important; justify-content:{flex}; }}
+        .st-key-eq_tbl div[data-testid="stButton"] button [data-testid="stMarkdownContainer"] {{ width:100%; text-align:{align}; }}
+        .st-key-eq_tbl div[data-testid="stButton"] button p {{ font-size:{fs}px !important; color:#0C447C !important;
+            text-align:{align}; width:100%; }}
         .st-key-eq_tbl div[data-testid="stButton"] button:hover {{ background:#eff6ff; border-color:#378ADD; }}
         </style>
         """, unsafe_allow_html=True)
@@ -3039,7 +3042,7 @@ elif "設備盤查" in menu:
                 for ci, (title, _) in enumerate(cols):
                     with row[ci]:
                         if title == "設備名稱":
-                            if st.button(name or "（未命名）", key=f"eqbtn_{key_prefix}_{start + li}"):
+                            if st.button(name or "（未命名）", key=f"eqbtn_{key_prefix}_{start + li}", use_container_width=True):
                                 clicked = (r, start + li)
                             continue
                         if title == "系統":
