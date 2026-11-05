@@ -8,7 +8,8 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import base64, json, os, math, glob, re
+import base64, json, os, math, glob, re, hashlib
+import html as _html
 from io import BytesIO
 from PIL import Image
 from datetime import datetime
@@ -462,9 +463,10 @@ def _si(v):
     except:
         return None
 
-def read_system(sheet, sys_label):
+def read_system(sheet, sys_label, src=None):
+    """src：要讀的 Excel（路徑、BytesIO 或 pd.ExcelFile）；不給就讀伺服器上的 EXCEL_FILE。"""
     try:
-        df = pd.read_excel(EXCEL_FILE, sheet_name=sheet, header=None)
+        df = pd.read_excel(src if src is not None else EXCEL_FILE, sheet_name=sheet, header=None)
     except Exception as e:
         st.warning(f"無法讀取工作表 {sheet}：{e}")
         return []
@@ -976,7 +978,8 @@ def _sync_sigs(records):
     用來和「上次與雲端同步時」的簽名比對，算出有幾項修改尚未上傳。照片用 hash 比對，不逐字比較。"""
     from collections import Counter
     fields = ("系統別", "設備名稱", "設備編號", "設備型式", "設備部門", "所在棟別", "所在樓層", "消耗功率(kW)", "設備數量",
-              "負載率", "運轉時數(hr/年)", "設備年份", "使用年數", "自評重大性", "設備管理者", "外包商承攬商", "相關變數")
+              "負載率", "運轉時數(hr/年)", "設備年份", "使用年數", "自評重大性", "設備管理者", "外包商承攬商", "相關變數",
+              "能效改善頻率", "改善執行難易度")
     def _n(v):
         if v is None or v == "":
             return ""
@@ -1161,8 +1164,18 @@ def push_equipment_to_supabase(records, force=False, progress=None):
                 "install_year": _si(rec.get("設備年份")), "age_years": _si(rec.get("使用年數")),
                 "criticality": _sf(rec.get("自評重大性")), "manager": rec.get("設備管理者"),
                 "contractor": rec.get("外包商承攬商"), "related_vars": rec.get("相關變數"),
+                "improve_freq": _sf(rec.get("能效改善頻率")), "improve_difficulty": _sf(rec.get("改善執行難易度")),
                 **paths,
             })
+
+        # 雲端若還沒新增 improve_freq／improve_difficulty 兩欄（SQL 尚未執行），改用舊欄位上傳，不讓整次上傳失敗
+        no_improve_cols = False
+        try:
+            sb.table("equipment").select("improve_freq,improve_difficulty").limit(1).execute()
+        except Exception:
+            no_improve_cols = True
+            for _r in rows:
+                _r.pop("improve_freq", None); _r.pop("improve_difficulty", None)
 
         _prog("寫入資料表", 0, 1)
         inserted_ids = []
@@ -1194,6 +1207,9 @@ def push_equipment_to_supabase(records, force=False, progress=None):
         if failures:
             photo_sum += f"、失敗 {len(failures)} 張"
         msg = f"已上傳 {len(rows)} 筆設備資料到 Supabase；照片：{photo_sum}"
+        if no_improve_cols:
+            msg += ("\n\n⚠️ 雲端 equipment 資料表還沒有 improve_freq、improve_difficulty 兩欄，"
+                    "「能效改善頻率」「改善執行難易度」這次沒有存到雲端。請到 Supabase 的 SQL Editor 執行新增欄位的 SQL 後，再上傳一次。")
         if not force and not comparable and plan:
             msg += "\n（無法取得雲端檔案清單或內容資訊，已全部重傳）"
         if failures:
@@ -1245,6 +1261,7 @@ def pull_equipment_from_supabase():
                 "使用年數": row.get("age_years"), "自評重大性": row.get("criticality"),
                 "設備管理者": row.get("manager"), "外包商承攬商": row.get("contractor"),
                 "相關變數": row.get("related_vars"),
+                "能效改善頻率": row.get("improve_freq"), "改善執行難易度": row.get("improve_difficulty"),
                 "外觀照片": None, "銘牌照片": None, "銘牌照片2": None,
             })
             for field, col in photo_cols:
@@ -1699,6 +1716,214 @@ def init_from_excel():
     else:
         # 雲端環境：使用內建示範資料
         return get_builtin_data()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4-1. Excel 合併匯入：比對上傳的 Excel 與網頁目前的設備清單
+#      只新增 Excel 有、網頁沒有的設備；數值有變動的由管理員逐台勾選才套用；
+#      照片一律不動，網頁有、Excel 沒有的設備也不刪除。
+# ─────────────────────────────────────────────────────────────────────────────
+# 比對欄位＝會上傳到雲端的欄位（與 _sync_sigs 相同，不含系統別）。
+# 「能效改善頻率」「改善執行難易度」（_MERGE_EXTRA）是後來才存進雲端的欄位，舊資料多半是空白：
+#   網頁空白、Excel 有值 → 列為「補填」，由一個勾選框整批處理；
+#   兩邊都有值但不同   → 才列為「變動」，逐台勾選；Excel 空白則不動網頁的值。
+_MERGE_FIELDS = ("設備名稱", "設備編號", "設備型式", "設備部門", "所在棟別", "所在樓層", "消耗功率(kW)", "設備數量",
+                 "負載率", "運轉時數(hr/年)", "設備年份", "使用年數", "自評重大性", "設備管理者", "外包商承攬商", "相關變數")
+_MERGE_EXTRA  = ("能效改善頻率", "改善執行難易度")
+_XL_SCORE_KEYS = ("_xl_seu_kwh_score", "_xl_seu_kw_score", "_xl_sc", "_xl_seu", "_xl_pri_share", "_xl_pri_age",
+                  "_xl_pri_op", "_xl_pri_freq", "_xl_pri_diff", "_xl_pri_score", "_xl_pri_tag")
+_MERGE_LABEL = {"消耗功率(kW)": "功率", "運轉時數(hr/年)": "運轉時數", "外包商承攬商": "外包商",
+                "能效改善頻率": "頻率", "改善執行難易度": "難易度"}
+
+def _mnorm(v):
+    """比對用的正規化：空值一律當空字串、2 與 2.0 視為相同、多餘空白與換行忽略。"""
+    if v is None or v == "":
+        return ""
+    try:
+        if isinstance(v, float) and math.isnan(v):
+            return ""
+        return f"{float(v):g}"
+    except (TypeError, ValueError):
+        return " ".join(str(v).split())
+
+def _has_real_code(rec):
+    """有真正的設備編號（不是空白，也不是上傳雲端時自動補的 NOID_序號）"""
+    c = str(rec.get("設備編號") or "").strip()
+    return bool(c) and not c.startswith("NOID_")
+
+def _merge_key(rec):
+    """判斷「同一台」的依據：有編號用 系統別＋編號；沒編號用 系統別＋名稱＋部門＋棟別＋樓層"""
+    sysn = _mnorm(rec.get("系統別"))
+    if _has_real_code(rec):
+        return ("ID", sysn, _mnorm(rec.get("設備編號")))
+    return ("NO", sysn) + tuple(_mnorm(rec.get(k)) for k in ("設備名稱", "設備部門", "所在棟別", "所在樓層"))
+
+def read_excel_for_merge(file_bytes):
+    """讀取上傳的評估表 Excel（表4-1～4-5），回傳 (設備清單, 缺少的分頁名稱清單)"""
+    xls = pd.ExcelFile(BytesIO(file_bytes))
+    missing = [sh for sh in SYSTEM_SHEETS.values() if sh not in xls.sheet_names]
+    recs = []
+    for s_, sh in SYSTEM_SHEETS.items():
+        if sh in xls.sheet_names:
+            recs.extend(read_system(sh, s_, xls))
+    return recs, missing
+
+def compare_excel_with_db(xl_recs, db):
+    """逐台比對。回傳 (items, 相同台數, 網頁有_Excel無的索引清單, 補填清單, 對應清單)
+    對應清單每筆：{"kind": "pair", "xl", "db", "diffs", "default": 預設是否勾選, "warn": 提醒文字}
+      ＝比對不到、但「同系統、同名稱、同部門、同棟別、同功率」的網頁設備（編號或位置不同），可能是同一台。
+    補填清單每筆：(網頁索引, Excel 索引, [要補填的欄位])；只有補填、沒有其他差異的設備算在「相同」裡。
+    items 每筆：{"kind": "new"/"change", "xl": Excel 索引, "db": 網頁索引, "diffs": [(欄位, 網頁值, Excel值)], "dup": bool}
+    同一個比對依據有好幾台（例如編號重複、或多台同名同位置的無編號設備）時，先配內容完全相同的，再配差異最少的。"""
+    def _diffs(i, x):
+        d = [(f, _mnorm(db[i].get(f)), _mnorm(x.get(f))) for f in _MERGE_FIELDS
+             if f != "設備編號" and _mnorm(db[i].get(f)) != _mnorm(x.get(f))]
+        for f in _MERGE_EXTRA:
+            a, b = _mnorm(db[i].get(f)), _mnorm(x.get(f))
+            if a and b and a != b:
+                d.append((f, a, b))
+        return d
+    groups = {}
+    for i, r in enumerate(db):
+        groups.setdefault(_merge_key(r), []).append(i)
+    # 同一個比對依據有好幾台時（例如好幾台同部門、同位置的「冷氣機」）：
+    # 第一輪先配「內容完全相同」的，第二輪剩下的再配「差異最少」的，避免依順序配對造成錯位。
+    match = {}
+    for exact in (True, False):
+        for j, x in enumerate(xl_recs):
+            if j in match:
+                continue
+            cands = groups.get(_merge_key(x)) or []
+            best = None
+            for i in cands:
+                d = _diffs(i, x)
+                if exact and d:
+                    continue
+                if best is None or len(d) < len(best[1]):
+                    best = (i, d)
+                    if not d:
+                        break
+            if best is not None:
+                cands.remove(best[0]); match[j] = best
+    used, items, n_same, fills = set(), [], 0, []
+    for j, x in enumerate(xl_recs):
+        if j not in match:
+            items.append({"kind": "new", "xl": j, "db": None, "diffs": [], "dup": False})
+            continue
+        i, diffs = match[j]; used.add(i)
+        _fill = [f for f in _MERGE_EXTRA if not _mnorm(db[i].get(f)) and _mnorm(x.get(f))]
+        if _fill:
+            fills.append((i, j, _fill))
+        if diffs:
+            items.append({"kind": "change", "xl": j, "db": i, "diffs": diffs, "dup": False})
+        else:
+            n_same += 1
+    web_only = [i for i in range(len(db)) if i not in used]
+
+    # 對應：新增的設備 ↔ 網頁有、Excel 無的設備，「同系統、同名稱、同部門、同棟別、同功率」就列為可能是同一台
+    #（常見原因：Excel 改了編號，或改了樓層／位置的寫法）。第一輪先配型式也相同的，第二輪再配型式不同的；
+    # 同一台網頁設備只會配一次，候選有好幾台時配差異最少的。
+    def _pkey(r):
+        return tuple(_mnorm(r.get(k)) for k in ("系統別", "設備名稱", "設備部門", "所在棟別", "消耗功率(kW)"))
+    def _pdiffs(i, x):
+        d = [(f, _mnorm(db[i].get(f)), _mnorm(x.get(f))) for f in _MERGE_FIELDS
+             if _mnorm(db[i].get(f)) != _mnorm(x.get(f)) and (f != "設備編號" or _has_real_code(x))]
+        for f in _MERGE_EXTRA:
+            a, b = _mnorm(db[i].get(f)), _mnorm(x.get(f))
+            if a and b and a != b:
+                d.append((f, a, b))
+        return d
+    free = set(web_only)
+    pairs, pmatch = [], {}
+    new_js = [it["xl"] for it in items if it["kind"] == "new"]
+    for same_type in (True, False):
+        for j in new_js:
+            if j in pmatch:
+                continue
+            x = xl_recs[j]
+            best = None
+            for i in sorted(free):
+                if _pkey(db[i]) != _pkey(x):
+                    continue
+                if same_type and _mnorm(db[i].get("設備型式")) != _mnorm(x.get("設備型式")):
+                    continue
+                d = _pdiffs(i, x)
+                if best is None or len(d) < len(best[1]):
+                    best = (i, d)
+            if best is not None:
+                free.discard(best[0]); pmatch[j] = best
+    codes_all = {}
+    for k, r in enumerate(db):
+        codes_all.setdefault(_mnorm(r.get("設備編號")), []).append(k)
+    for j in new_js:
+        if j not in pmatch:
+            continue
+        i, d = pmatch[j]; x = xl_recs[j]
+        if not d:
+            # 內容完全相同、只是網頁有編號而 Excel 沒填（例如飲水供應機）：視為同一台，算在「相同」，不必再勾選
+            n_same += 1
+            _fill = [f for f in _MERGE_EXTRA if not _mnorm(db[i].get(f)) and _mnorm(x.get(f))]
+            if _fill:
+                fills.append((i, j, _fill))
+            continue
+        warn = []
+        if _mnorm(db[i].get("設備型式")) != _mnorm(x.get("設備型式")):
+            warn.append("型式不同")
+        if _has_real_code(x) and any(k != i for k in codes_all.get(_mnorm(x.get("設備編號")), [])):
+            warn.append("新編號與網頁另一台相同（照片檔會共用）")
+        pairs.append({"kind": "pair", "xl": j, "db": i, "diffs": d, "default": not warn, "warn": "、".join(warn)})
+    items = [it for it in items if not (it["kind"] == "new" and it["xl"] in pmatch)]
+    web_only = [i for i in web_only if i in free]
+
+    # 「可能重複」：剩下的新增設備，在剩下的「網頁有、Excel 無」裡仍找得到同系統、同名稱、同部門、同棟別、同功率的設備
+    left = {_pkey(db[i]) for i in web_only}
+    for it in items:
+        if it["kind"] == "new":
+            it["dup"] = _pkey(xl_recs[it["xl"]]) in left
+    return items, n_same, web_only, fills, pairs
+
+def apply_excel_merge(db, xl_recs, items, fills=()):
+    """把勾選的 items（new／change／pair）與補填清單套用到 db（就地修改），回傳 (新增台數, 更新台數, 補填台數, 對應台數)。
+    對應：網頁那台改成 Excel 的資料（Excel 有編號才改編號），照片保留。
+    補填：只填入網頁仍是空白的「能效改善頻率」「改善執行難易度」，不改其他欄位與分數。
+    新增：加在清單最後面（原有設備順序不變），沒有編號的直接給一個不重複的 NOID_序號；
+    更新：只改數值欄位與 Excel 算好的分數，照片與設備編號不動。"""
+    codes = {str(r.get("設備編號") or "").strip() for r in db}
+    nums = [int(m.group(1)) for c in codes for m in [re.match(r"NOID_(\d+)$", c)] if m]
+    nxt = max(nums + [len(db) - 1]) + 1
+    n_new = n_chg = n_pair = 0
+    for it in items:
+        x = xl_recs[it["xl"]]
+        if it["kind"] in ("change", "pair"):
+            rec = db[it["db"]]
+            for f in _MERGE_FIELDS:
+                if f != "設備編號" or (it["kind"] == "pair" and _has_real_code(x)):
+                    rec[f] = x.get(f)
+            for f in _MERGE_EXTRA:          # Excel 空白時不動網頁的值
+                if _mnorm(x.get(f)):
+                    rec[f] = x.get(f)
+            for k in _XL_SCORE_KEYS:
+                rec[k] = x.get(k)
+            if it["kind"] == "pair":
+                n_pair += 1
+            else:
+                n_chg += 1
+        else:
+            rec = dict(x)
+            rec["外觀照片"] = rec["銘牌照片"] = rec["銘牌照片2"] = None
+            if not _has_real_code(rec):
+                while f"NOID_{nxt}" in codes:
+                    nxt += 1
+                rec["設備編號"] = f"NOID_{nxt}"; codes.add(rec["設備編號"]); nxt += 1
+            db.append(rec)
+            n_new += 1
+    n_fill = 0
+    for i, j, flds in fills:
+        done = False
+        for f in flds:
+            if not _mnorm(db[i].get(f)) and _mnorm(xl_recs[j].get(f)):
+                db[i][f] = xl_recs[j].get(f); done = True
+        n_fill += done
+    return n_new, n_chg, n_fill, n_pair
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. Session 初始化
@@ -2458,11 +2683,18 @@ def _render_equipment_detail(r, db_idx, loop_idx):
         centered_table(df_a, context="equip")
     with sc_col2:
         st.caption("優先改善項目鑑別（I 級）")
+        # 頻率／難易度沒填（也沒有 Excel 算好的分數）時，評分是用預設 3 分算的：分數下加一行小灰字提醒
+        def _dflt(v, raw_key, xl_key):
+            if _mnorm(r.get(raw_key)) or _mnorm(r.get(xl_key)):
+                return v
+            return f"{v}<div style='font-size:0.75em;color:#94a3b8;line-height:1.3'>未填，預設</div>"
         df_i = pd.DataFrame({
             "鑑別因子": ["設備耗能估比", "設備老舊度", "設備運轉度", "能效改善頻率",
                         "改善執行難易度", "優先改善評分", "優先改善項目鑑別"],
             "分數":     [r.get("耗能估比分數"), r.get("老舊度分數"), r.get("運轉度分數"),
-                        r.get("改善頻率分數"), r.get("改善難易度分數"), r.get("優先改善評分"),
+                        _dflt(r.get("改善頻率分數"), "能效改善頻率", "_xl_pri_freq"),
+                        _dflt(r.get("改善難易度分數"), "改善執行難易度", "_xl_pri_diff"),
+                        r.get("優先改善評分"),
                         "🔧 I 級" if r.get("優先改善鑑別") == "I" else "一般設備"],
         })
         centered_table(df_i, context="equip")
@@ -3996,6 +4228,202 @@ elif "重大設備" in menu:
 # ─────────────────────────────────────────────────────────────────────────────
 elif "Excel" in menu:
     st.subheader("🔄 從 Excel 重新載入資料")
+
+    # ── Excel 合併匯入（逐台勾選）：只新增與更新勾選的設備，照片不動、不刪除網頁設備 ──
+    st.markdown("#### 📥 Excel 合併匯入")
+    st.caption("上傳新的評估表 Excel，逐台比對網頁目前的設備：新增的設備加入清單，數值有變動的由您勾選才套用；"
+               "照片一律保留，網頁有、Excel 沒有的設備不會刪除。合併後請到同步頁「上傳到 Supabase」才會存到雲端。")
+    if _mg_msg := st.session_state.pop("merge_flash", None):
+        st.success(_mg_msg)
+    if not st.session_state["edit_mode"]:
+        st.info("請切換至「✏️ 修改模式」才能使用合併匯入。")
+    else:
+        _mg_up = st.file_uploader("選擇評估表 Excel（.xlsx）", type=["xlsx"],
+                                  key=f"merge_xlsx_{st.session_state.get('merge_up_ver', 0)}")
+        if _mg_up is not None:
+            _mg_bytes = _mg_up.getvalue()
+            _mg_hash = hashlib.md5(_mg_bytes).hexdigest()
+            _mg_cache = st.session_state.get("merge_parse")
+            if not _mg_cache or _mg_cache[0] != _mg_hash:
+                try:
+                    _xl, _miss = read_excel_for_merge(_mg_bytes)
+                    _mg_cache = (_mg_hash, _xl, _miss, None)
+                except Exception as e:
+                    _mg_cache = (_mg_hash, [], [], f"{type(e).__name__}: {e}")
+                st.session_state["merge_parse"] = _mg_cache
+                st.session_state["merge_sel"] = None; st.session_state["merge_ed_ver"] = 0
+            _, _xl, _miss, _xl_err = _mg_cache
+            _db = st.session_state["db"]
+            if _xl_err:
+                st.error(f"❌ 無法讀取這份 Excel：{_xl_err}")
+            elif not _xl:
+                st.error("❌ 這份 Excel 讀不到任何設備，請確認是「重大能源使用設備評估表」（表4-1～表4-5）。")
+            else:
+                if _miss:
+                    st.warning("⚠️ Excel 缺少分頁：" + "、".join(_miss) + "（這些系統不會比對）")
+                from collections import Counter as _Ctr
+                _dupc = _Ctr((x["系統別"], _mnorm(x["設備編號"])) for x in _xl if _has_real_code(x))
+                _dups = [f"{c}（{n} 台）" for (_, c), n in _dupc.items() if n > 1]
+                if _dups:
+                    st.warning("⚠️ Excel 內有重複的設備編號，會優先與內容相同的網頁設備配對：" + "、".join(_dups))
+                _items, _n_same, _web_only, _fills, _pairs = compare_excel_with_db(_xl, _db)
+                _n_new = sum(1 for it in _items if it["kind"] == "new")
+                _n_chg = len(_items) - _n_new
+                _m1, _m5, _m2, _m3, _m4 = st.columns(5)
+                _m1.metric("🟢 新增", f"{_n_new} 台")
+                _m5.metric("🟣 對應", f"{len(_pairs)} 台")
+                _m2.metric("🟡 數值有變動", f"{_n_chg} 台")
+                _m3.metric("⚪ 相同", f"{_n_same} 台")
+                _m4.metric("⚫ 網頁有、Excel 無", f"{len(_web_only)} 台")
+                st.caption(f"Excel 共 {len(_xl)} 台，網頁目前 {len(_db)} 台。")
+                _do_fill = False
+                if _fills:
+                    with st.container(border=True):
+                        st.markdown(f"🔵 **補填：{len(_fills)} 台**網頁空白的「能效改善頻率」「改善執行難易度」，"
+                                    "會以 Excel 的值填入（網頁已有值的不會被蓋掉）。")
+                        _do_fill = st.checkbox("一併補填", value=True, key="merge_do_fill")
+
+                # 🟣 對應：可能是同一台（編號或位置不同）——左邊網頁現有（保留照片）、右邊 Excel，差異反黃
+                _pair_pick = []
+                if _pairs:
+                    st.markdown(f"<div style='color:#7c3aed;font-weight:600;margin-top:8px'>🟣 可能是同一台（編號或位置不同）"
+                                f"{len(_pairs)} 台</div>", unsafe_allow_html=True)
+                    st.caption("同系統、同名稱、同部門、同棟別、同功率，但編號或位置不同。勾選「視為同一台」後，網頁那台會改成 Excel 的編號"
+                               "與資料，照片保留；不勾選就會分別列在「新增」與「網頁有、Excel 無」。型式不同或新編號與別台相同的預設不勾選。")
+                    _pk = lambda k: f"merge_pair_{_mg_hash[:8]}_{k}"
+                    _pa, _pb, _ = st.columns([1, 1, 2])
+                    if _pa.button("全選對應", use_container_width=True, key="merge_pair_all"):
+                        for k in range(len(_pairs)):
+                            st.session_state[_pk(k)] = True
+                    if _pb.button("全部取消對應", use_container_width=True, key="merge_pair_none"):
+                        for k in range(len(_pairs)):
+                            st.session_state[_pk(k)] = False
+                    def _side(r, dfields, show_photo):
+                        def hl(f, txt):
+                            t = _html.escape(txt)
+                            return (f"<span style='background:#fef3c7;color:#92400e;border-radius:3px;padding:0 3px'>{t}</span>"
+                                    if f in dfields else t)
+                        nm_ = " ".join(str(r.get("設備名稱") or "").split())
+                        code = str(r.get("設備編號") or "").strip() if _has_real_code(r) or show_photo else ""
+                        code = code if code else "（無編號）"
+                        cam = " 📷" if show_photo and r.get("外觀照片") else ""
+                        sub = " ".join(x for x in (hl("設備部門", str(r.get("設備部門") or "")),
+                                                   hl("所在棟別", str(r.get("所在棟別") or "")),
+                                                   hl("所在樓層", " ".join(str(r.get("所在樓層") or "").split())),
+                                                   f"{_mnorm(r.get('消耗功率(kW)'))}kW") if x)
+                        typ = " ".join(str(r.get("設備型式") or "").split())
+                        return (f"<div style='font-size:14px;line-height:1.5'>{_html.escape(nm_)} {hl('設備編號', code)}{cam}"
+                                f"<br><span style='color:#64748b;font-size:12.5px'>{sub}<br>型式 {hl('設備型式', typ or '—')}</span></div>")
+                    _main = {"設備編號", "所在棟別", "所在樓層", "設備型式", "設備部門"}
+                    for k, pr in enumerate(_pairs):
+                        r_w, x_e = _db[pr["db"]], _xl[pr["xl"]]
+                        dfields = {f for f, _, _ in pr["diffs"]}
+                        if not _has_real_code(x_e):
+                            dfields.discard("設備編號")
+                        with st.container(border=True):
+                            c0, c1, c2, c3 = st.columns([0.9, 4, 0.4, 4], vertical_alignment="center")
+                            if _pk(k) not in st.session_state:
+                                st.session_state[_pk(k)] = pr["default"]
+                            if c0.checkbox("視為同一台", key=_pk(k)):
+                                _pair_pick.append(pr)
+                            c1.markdown(_side(r_w, dfields, True), unsafe_allow_html=True)
+                            c2.markdown("<div style='text-align:center;font-size:18px'>→</div>", unsafe_allow_html=True)
+                            c3.markdown(_side(x_e, dfields, False), unsafe_allow_html=True)
+                            _other = [f"{_MERGE_LABEL.get(f, f)} {a or '（空白）'} → {b or '（空白）'}"
+                                      for f, a, b in pr["diffs"] if f not in _main]
+                            _note = ("⚠️ " + pr["warn"]) if pr["warn"] else ""
+                            if _other or _note:
+                                st.caption("　".join(x for x in (_note, ("其他差異：" + "；".join(_other)) if _other else "") if x))
+
+                if _items:
+                    # 勾選狀態：預設「新增」勾選、「變動」不勾選（保留網頁資料）；按全選鈕時改寫這裡並重建表格
+                    if st.session_state.get("merge_sel") is None or len(st.session_state["merge_sel"]) != len(_items):
+                        st.session_state["merge_sel"] = [it["kind"] == "new" and not it["dup"] for it in _items]
+                    _sel = st.session_state["merge_sel"]
+                    def _fmt_diff(it):
+                        return "；".join(f"{_MERGE_LABEL.get(f, f)} {a or '（空白）'} → {b or '（空白）'}" for f, a, b in it["diffs"])
+                    _rows = []
+                    for k, it in enumerate(_items):
+                        x = _xl[it["xl"]]
+                        _rows.append({
+                            "套用": _sel[k],
+                            "狀態": "🟢 新增" if it["kind"] == "new" else "🟡 變動",
+                            "系統別": x.get("系統別"),
+                            "設備名稱": " ".join(str(x.get("設備名稱") or "").split()),
+                            "設備編號": x.get("設備編號") if _has_real_code(x) else
+                                        (str(_db[it["db"]].get("設備編號") or "") if it["db"] is not None else "（無編號）"),
+                            "棟別／樓層": f"{x.get('所在棟別') or ''} {x.get('所在樓層') or ''}".strip(),
+                            "變動內容": _fmt_diff(it) if it["kind"] == "change" else "",
+                            "提醒": "⚠️ 可能與網頁現有設備重複" if it["dup"] else "",
+                        })
+                    _df = pd.DataFrame(_rows)
+                    if any(it["dup"] for it in _items):
+                        st.warning("⚠️ 標示「可能與網頁現有設備重複」的設備：網頁上有同名稱或同編號、但比對不到的設備"
+                                   "（例如在網頁上改過名稱、部門或位置）。這些預設不勾選，加入前請先確認，以免多出重複的設備。")
+                    _ed = st.data_editor(
+                        _df, key=f"merge_editor_{st.session_state.get('merge_ed_ver', 0)}",
+                        hide_index=True, use_container_width=True,
+                        disabled=[c for c in _df.columns if c != "套用"],
+                        column_config={"套用": st.column_config.CheckboxColumn("套用", width="small"),
+                                       "變動內容": st.column_config.TextColumn("變動內容", width="large")})
+                    _cur = [bool(v) for v in _ed["套用"].tolist()]
+                    _b1, _b2, _b3 = st.columns(3)
+                    def _set_sel(fn):
+                        st.session_state["merge_sel"] = [fn(it, _cur[k]) for k, it in enumerate(_items)]
+                        st.session_state["merge_ed_ver"] = st.session_state.get("merge_ed_ver", 0) + 1
+                        st.rerun()
+                    if _b1.button("全選新增", use_container_width=True, key="merge_all_new"):
+                        _set_sel(lambda it, v: True if it["kind"] == "new" and not it["dup"] else v)   # 可能重複的不自動勾
+                    if _b2.button("全選變動", use_container_width=True, key="merge_all_chg"):
+                        _set_sel(lambda it, v: True if it["kind"] == "change" else v)
+                    if _b3.button("全部取消", use_container_width=True, key="merge_none"):
+                        _set_sel(lambda it, v: False)
+
+                else:
+                    _cur = []
+                _picked = [it for k, it in enumerate(_items) if _cur[k]]
+                _fill_list = _fills if _do_fill else []
+                if _picked or _fill_list or _pair_pick:
+                    _snap = list(_db)
+                    st.download_button(
+                        "⬇️ 合併前先下載目前資料備份（含照片，JSON）",
+                        lambda: json.dumps(_snap, ensure_ascii=False, default=str).encode("utf-8"),
+                        f"equipment_db_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                        "application/json", use_container_width=True, key="merge_backup_dl")
+                    _pn = sum(1 for it in _picked if it["kind"] == "new")
+                    if st.button(f"✅ 合併：新增 {_pn} 台、對應 {len(_pair_pick)} 台、更新 {len(_picked) - _pn} 台、"
+                                 f"補填 {len(_fill_list)} 台",
+                                 type="primary", use_container_width=True, key="merge_apply"):
+                        n_add, n_upd, n_fil, n_par = apply_excel_merge(st.session_state["db"], _xl,
+                                                                       _picked + _pair_pick, _fill_list)
+                        save_json(st.session_state["db"])
+                        log_activity("Excel 合併匯入", f"{_mg_up.name}：新增 {n_add} 台、對應 {n_par} 台、更新 {n_upd} 台、"
+                                     f"補填 {n_fil} 台，目前共 {len(st.session_state['db'])} 台")
+                        _flash = (f"✅ 已合併：新增 {n_add} 台、對應 {n_par} 台、更新 {n_upd} 台、補填 {n_fil} 台，"
+                                  f"目前共 {len(st.session_state['db'])} 台。目前只存在這台伺服器，請到同步頁按「上傳到 Supabase」存到雲端。")
+                        if n_par:
+                            _flash += "（有改編號的設備，上傳時會用新檔名重傳照片，會比平常久一些）"
+                        st.session_state["merge_flash"] = _flash
+                        st.session_state["merge_parse"] = None; st.session_state["merge_sel"] = None
+                        st.session_state["merge_up_ver"] = st.session_state.get("merge_up_ver", 0) + 1
+                        st.rerun()
+                elif not _items and not _fills and not _pairs:
+                    st.success("✅ Excel 與網頁資料相同，沒有需要新增、更新或補填的設備。")
+                else:
+                    st.info("目前沒有勾選任何要合併的項目。")
+
+                if _web_only:
+                    with st.expander(f"⚫ 網頁有、Excel 沒有的設備（{len(_web_only)} 台，不會刪除）"):
+                        st.dataframe(pd.DataFrame([{
+                            "系統別": _db[i].get("系統別"),
+                            "設備名稱": " ".join(str(_db[i].get("設備名稱") or "").split()),
+                            "設備編號": _db[i].get("設備編號"),
+                            "部門": _db[i].get("設備部門"),
+                            "棟別／樓層": f"{_db[i].get('所在棟別') or ''} {_db[i].get('所在樓層') or ''}".strip(),
+                        } for i in _web_only]), hide_index=True, use_container_width=True)
+
+    st.divider()
+    st.markdown("#### 🔁 整批覆蓋（原功能）")
     st.warning("⚠️ 此操作將覆蓋所有已修改的設備資料與照片，請謹慎！")
 
     if not os.path.exists(EXCEL_FILE):
