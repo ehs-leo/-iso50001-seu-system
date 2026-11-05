@@ -3155,15 +3155,14 @@ elif "設備盤查" in menu:
                         st.success(f"✅ 設備【{in_name}】已寫入！" + ("　📷 " + "、".join(photo_msgs) if photo_msgs else ""))
                         st.rerun()
 
-    # ── 搜尋 + 設備篩選（窄框 + 確認鍵，輸入完按確認才套用）
-    kw_f  = narrow_text_with_confirm(
-        "🔍 搜尋設備名稱 / 編號 / 部門 / 型號說明 / 所在棟別 / 所在樓層（跨系統搜尋）", "kw_f_val", "kw_f",
-        help="可用空格分隔多個關鍵字，每個都出現才會列出（例如「烘箱 謙銳」「二廠 烘箱」）。棟別與樓層可以連著打（二廠1F）、用空格隔開（二廠 1F），「1樓」等於「1F」。"
-             "全形半形、大小寫、空白與符號（- _ / . 等）都不影響，「DV452」可以找到「DV-452」。")
+    # ── 搜尋 + 設備篩選 + 照片狀態篩選：三格直排、共用一個確認鍵（v3.6）
+    # 改好條件後按一次「套用搜尋與篩選」才一起套用；在搜尋框按 Enter（或改完點到框外）也會一起套用。
+    # 搜尋框清空時自動套用空白，避免「框看起來是空的、實際還在用舊關鍵字篩選」。
     # 設備篩選：全部／A 級重大設備／五個系統。選系統＝切到該系統（系統模式與卡片連動；搜尋模式只列該系統）。
     # 點卡片時若下拉目前是某個系統，下拉要跟著換成被點的系統：下拉選單已經建立之後不能再改它的值，
     # 所以點卡片時先留一個旗標，下一次執行時、在建立下拉選單之前套用。
     _SEU_OPTIONS = ["全部", "A 級重大設備"] + list(SYSTEM_SHEETS)
+    _PHOTO_OPTIONS = ["全部", "缺外觀照片", "缺銘牌照片", "外觀與銘牌皆缺", "照片齊全"]
     _sync_to = st.session_state.pop("_seu_f_sync", None)
     if _sync_to in _SEU_OPTIONS:
         st.session_state["seu_f_val"] = _sync_to
@@ -3171,14 +3170,41 @@ elif "設備盤查" in menu:
     if st.session_state.get("seu_f_val") not in _SEU_OPTIONS:      # 舊的選項值（例如已拿掉的「一般設備」）→ 視為「全部」
         st.session_state["seu_f_val"] = "全部"
         st.session_state.pop("seu_f_draft", None)
-    seu_f = narrow_select_with_confirm("設備篩選", _SEU_OPTIONS, "seu_f_val", "seu_f")
-    # 照片缺漏相關功能（篩選、統計、清單、下載）只在管理員解鎖（修改模式）時顯示；
-    # 唯讀模式固定視為「全部」，_photo_match 會直接放行，不影響原本的清單。
-    if st.session_state["edit_mode"]:
-        photo_f = narrow_select_with_confirm("照片狀態篩選", ["全部", "缺外觀照片", "缺銘牌照片", "外觀與銘牌皆缺", "照片齊全"],
-                                             "photo_f_val", "photo_f")
-    else:
-        photo_f = "全部"
+    st.session_state.setdefault("kw_f_val", "")
+    st.session_state.setdefault("photo_f_val", "全部")
+    if st.session_state["photo_f_val"] not in _PHOTO_OPTIONS:
+        st.session_state["photo_f_val"] = "全部"
+
+    def _apply_filters():
+        """把三格目前的內容（草稿）一起套用"""
+        ss = st.session_state
+        ss["kw_f_val"] = ss.get("kw_f_draft", ss["kw_f_val"])
+        ss["seu_f_val"] = ss.get("seu_f_draft", ss["seu_f_val"])
+        if ss["edit_mode"]:
+            ss["photo_f_val"] = ss.get("photo_f_draft", ss["photo_f_val"])
+
+    _fcol, _fsp = st.columns([1, 2])
+    with _fcol:
+        _kw_draft = st.text_input(
+            "🔍 搜尋設備名稱 / 編號 / 部門 / 型號說明 / 所在棟別 / 所在樓層（跨系統搜尋）",
+            value=st.session_state["kw_f_val"], key="kw_f_draft", on_change=_apply_filters,
+            help="可用空格分隔多個關鍵字，每個都出現才會列出（例如「烘箱 謙銳」「二廠 烘箱」）。棟別與樓層可以連著打（二廠1F）、用空格隔開（二廠 1F），「1樓」等於「1F」。"
+                 "全形半形、大小寫、空白與符號（- _ / . 等）都不影響，「DV452」可以找到「DV-452」。")
+        st.selectbox("設備篩選", _SEU_OPTIONS, index=_SEU_OPTIONS.index(st.session_state["seu_f_val"]), key="seu_f_draft")
+        # 照片缺漏相關功能（篩選、統計、清單、下載）只在管理員解鎖（修改模式）時顯示；
+        # 唯讀模式固定視為「全部」，_photo_match 會直接放行，不影響原本的清單。
+        if st.session_state["edit_mode"]:
+            st.selectbox("照片狀態篩選", _PHOTO_OPTIONS, index=_PHOTO_OPTIONS.index(st.session_state["photo_f_val"]),
+                         key="photo_f_draft")
+        if st.button("🔍 套用搜尋與篩選", key="filters_confirm", type="primary", use_container_width=True):
+            _apply_filters()
+            st.rerun()
+    if _kw_draft == "" and st.session_state["kw_f_val"] != "":
+        st.session_state["kw_f_val"] = ""
+        st.rerun()
+    kw_f  = st.session_state["kw_f_val"]
+    seu_f = st.session_state["seu_f_val"]
+    photo_f = st.session_state["photo_f_val"] if st.session_state["edit_mode"] else "全部"
     rows  = all_calc()
 
     # 照片缺漏統計（不受上面篩選影響，永遠統計全部設備）＋缺漏清單＋可下載 CSV（僅修改模式）
