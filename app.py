@@ -209,11 +209,10 @@ def narrow_text_with_confirm(label, state_key, key_prefix, help=None):
         st.session_state[state_key] = ""
     col, _sp = st.columns([1, 2])
     with col:
-        ci, cb = st.columns([4, 1])
+        ci, cb = st.columns([4, 1], vertical_alignment="bottom")   # 確認鍵對齊框的底部，標題換行也不會跑掉
         with ci:
             draft = st.text_input(label, value=st.session_state[state_key], key=f"{key_prefix}_draft", help=help)
         with cb:
-            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
             if st.button("確認", key=f"{key_prefix}_confirm", use_container_width=True):
                 st.session_state[state_key] = draft
                 st.rerun()
@@ -228,12 +227,11 @@ def narrow_select_with_confirm(label, options, state_key, key_prefix):
         st.session_state[state_key] = options[0]
     col, _sp = st.columns([1, 2])
     with col:
-        ci, cb = st.columns([4, 1])
+        ci, cb = st.columns([4, 1], vertical_alignment="bottom")   # 確認鍵對齊框的底部，標題換行也不會跑掉
         with ci:
             idx = options.index(st.session_state[state_key]) if st.session_state[state_key] in options else 0
             draft = st.selectbox(label, options, index=idx, key=f"{key_prefix}_draft")
         with cb:
-            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
             if st.button("確認", key=f"{key_prefix}_confirm", use_container_width=True):
                 st.session_state[state_key] = draft
                 st.rerun()
