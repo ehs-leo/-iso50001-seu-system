@@ -1882,8 +1882,9 @@ def compare_excel_with_db(xl_recs, db):
     return items, n_same, web_only, fills, pairs
 
 def apply_excel_merge(db, xl_recs, items, fills=()):
-    """把勾選的 items（new／change／pair）與補填清單套用到 db（就地修改），回傳 (新增台數, 更新台數, 補填台數, 對應台數)。
-    對應：網頁那台改成 Excel 的資料（Excel 有編號才改編號），照片保留。
+    """把勾選的 items（new／change／pair／pair_web）與補填清單套用到 db（就地修改），回傳 (新增台數, 更新台數, 補填台數, 對應台數)。
+    對應（以 Excel 為準，pair）：網頁那台改成 Excel 的資料（Excel 有編號才改編號），照片保留。
+    對應（以網頁為準，pair_web）：網頁那台不動，只補填空白的「能效改善頻率」「改善執行難易度」。
     補填：只填入網頁仍是空白的「能效改善頻率」「改善執行難易度」，不改其他欄位與分數。
     新增：加在清單最後面（原有設備順序不變），沒有編號的直接給一個不重複的 NOID_序號；
     更新：只改數值欄位與 Excel 算好的分數，照片與設備編號不動。"""
@@ -1893,6 +1894,13 @@ def apply_excel_merge(db, xl_recs, items, fills=()):
     n_new = n_chg = n_pair = 0
     for it in items:
         x = xl_recs[it["xl"]]
+        if it["kind"] == "pair_web":       # 以網頁為準：網頁那台不動，只補填空白的頻率／難易度
+            rec = db[it["db"]]
+            for f in _MERGE_EXTRA:
+                if not _mnorm(rec.get(f)) and _mnorm(x.get(f)):
+                    rec[f] = x.get(f)
+            n_pair += 1
+            continue
         if it["kind"] in ("change", "pair"):
             rec = db[it["db"]]
             for f in _MERGE_FIELDS:
@@ -4288,17 +4296,21 @@ elif "Excel" in menu:
                 if _pairs:
                     st.markdown(f"<div style='color:#7c3aed;font-weight:600;margin-top:8px'>🟣 可能是同一台（編號或位置不同）"
                                 f"{len(_pairs)} 台</div>", unsafe_allow_html=True)
-                    st.caption("同系統、同名稱、同部門、同棟別、同功率，但編號或位置不同。勾選「視為同一台」後，網頁那台會改成 Excel 的編號"
-                               "與資料，照片保留；不勾選就會分別列在「新增」與「網頁有、Excel 無」。型式不同或新編號與別台相同的預設不勾選。")
-                    _pk = lambda k: f"merge_pair_{_mg_hash[:8]}_{k}"
-                    _pa, _pb, _ = st.columns([1, 1, 2])
-                    if _pa.button("全選對應", use_container_width=True, key="merge_pair_all"):
-                        for k in range(len(_pairs)):
-                            st.session_state[_pk(k)] = True
-                    if _pb.button("全部取消對應", use_container_width=True, key="merge_pair_none"):
-                        for k in range(len(_pairs)):
-                            st.session_state[_pk(k)] = False
-                    def _side(r, dfields, show_photo):
+                    st.caption("同系統、同名稱、同部門、同棟別、同功率，但編號或位置不同。每組可選："
+                               "「以網頁為準」網頁那台完全不動（只補填空白的頻率／難易度），但下次上傳同一份 Excel 這組還會再出現；"
+                               "「以 Excel 為準」網頁那台改成 Excel 的編號與資料，照片保留；"
+                               "「不對應」視為兩台不同設備：網頁那台保留不動，Excel 那台另外新增一台（沒有照片）。綠框是合併後會留下的資料。"
+                               "預設：型式相同的以 Excel 為準，有 ⚠️ 的以網頁為準（什麼都不改，最保險）。")
+                    _P_WEB, _P_XL, _P_NONE = "以網頁為準", "以 Excel 為準", "不對應"
+                    _pk = lambda k: f"merge_pdir_{_mg_hash[:8]}_{k}"
+                    _pa, _pb, _pc, _ = st.columns([1, 1, 1, 1])
+                    for _btn, _lab, _val, _bk in ((_pa, "全部以網頁為準", _P_WEB, "merge_pair_web"),
+                                                  (_pb, "全部以 Excel 為準", _P_XL, "merge_pair_xl"),
+                                                  (_pc, "全部不對應", _P_NONE, "merge_pair_none")):
+                        if _btn.button(_lab, use_container_width=True, key=_bk):
+                            for k in range(len(_pairs)):
+                                st.session_state[_pk(k)] = _val
+                    def _side(r, dfields, show_photo, state="", tag_txt=None):
                         def hl(f, txt):
                             t = _html.escape(txt)
                             return (f"<span style='background:#fef3c7;color:#92400e;border-radius:3px;padding:0 3px'>{t}</span>"
@@ -4312,7 +4324,15 @@ elif "Excel" in menu:
                                                    hl("所在樓層", " ".join(str(r.get("所在樓層") or "").split())),
                                                    f"{_mnorm(r.get('消耗功率(kW)'))}kW") if x)
                         typ = " ".join(str(r.get("設備型式") or "").split())
-                        return (f"<div style='font-size:14px;line-height:1.5'>{_html.escape(nm_)} {hl('設備編號', code)}{cam}"
+                        if state == "keep":
+                            box = "border:1.5px solid #16a34a;background:#f0fdf4;border-radius:6px;padding:4px 8px;"
+                            tag = ("<div style='font-size:11.5px;color:#16a34a;font-weight:600'>"
+                                   + (tag_txt or ("保留" if show_photo else "採用（照片保留）")) + "</div>")
+                        elif state == "drop":
+                            box, tag = "opacity:.45;border:1.5px solid transparent;padding:4px 8px;", ""
+                        else:
+                            box, tag = "border:1.5px solid transparent;padding:4px 8px;", ""
+                        return (f"<div style='font-size:14px;line-height:1.5;{box}'>{tag}{_html.escape(nm_)} {hl('設備編號', code)}{cam}"
                                 f"<br><span style='color:#64748b;font-size:12.5px'>{sub}<br>型式 {hl('設備型式', typ or '—')}</span></div>")
                     _main = {"設備編號", "所在棟別", "所在樓層", "設備型式", "設備部門"}
                     for k, pr in enumerate(_pairs):
@@ -4321,14 +4341,22 @@ elif "Excel" in menu:
                         if not _has_real_code(x_e):
                             dfields.discard("設備編號")
                         with st.container(border=True):
-                            c0, c1, c2, c3 = st.columns([0.9, 4, 0.4, 4], vertical_alignment="center")
                             if _pk(k) not in st.session_state:
-                                st.session_state[_pk(k)] = pr["default"]
-                            if c0.checkbox("視為同一台", key=_pk(k)):
-                                _pair_pick.append(pr)
-                            c1.markdown(_side(r_w, dfields, True), unsafe_allow_html=True)
-                            c2.markdown("<div style='text-align:center;font-size:18px'>→</div>", unsafe_allow_html=True)
-                            c3.markdown(_side(x_e, dfields, False), unsafe_allow_html=True)
+                                st.session_state[_pk(k)] = _P_XL if pr["default"] else _P_WEB
+                            _dir = st.radio("對應方式", [_P_WEB, _P_XL, _P_NONE], key=_pk(k), horizontal=True,
+                                            label_visibility="collapsed")
+                            if _dir == _P_XL:
+                                _pair_pick.append(pr); _sw, _sx = "drop", "keep"
+                            elif _dir == _P_WEB:
+                                _pair_pick.append(dict(pr, kind="pair_web")); _sw, _sx = "keep", "drop"
+                            else:
+                                _pair_pick.append(dict(pr, kind="new", dup=False)); _sw, _sx = "keep", "keep"
+                            c1, c2, c3 = st.columns([4, 0.4, 4], vertical_alignment="center")
+                            c1.markdown(_side(r_w, dfields, True, _sw), unsafe_allow_html=True)
+                            c2.markdown("<div style='text-align:center;font-size:18px'>"
+                                        + ("＋" if _dir == _P_NONE else "→") + "</div>", unsafe_allow_html=True)
+                            c3.markdown(_side(x_e, dfields, False, _sx,
+                                              "另新增一台（沒有照片）" if _dir == _P_NONE else None), unsafe_allow_html=True)
                             _other = [f"{_MERGE_LABEL.get(f, f)} {a or '（空白）'} → {b or '（空白）'}"
                                       for f, a, b in pr["diffs"] if f not in _main]
                             _note = ("⚠️ " + pr["warn"]) if pr["warn"] else ""
@@ -4390,18 +4418,25 @@ elif "Excel" in menu:
                         lambda: json.dumps(_snap, ensure_ascii=False, default=str).encode("utf-8"),
                         f"equipment_db_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
                         "application/json", use_container_width=True, key="merge_backup_dl")
-                    _pn = sum(1 for it in _picked if it["kind"] == "new")
-                    if st.button(f"✅ 合併：新增 {_pn} 台、對應 {len(_pair_pick)} 台、更新 {len(_picked) - _pn} 台、"
+                    _pn_items = sum(1 for it in _picked if it["kind"] == "new")
+                    _pw = sum(1 for p_ in _pair_pick if p_["kind"] == "pair_web")
+                    _px = sum(1 for p_ in _pair_pick if p_["kind"] == "pair")
+                    _pnone = sum(1 for p_ in _pair_pick if p_["kind"] == "new")
+                    _pn = _pn_items + _pnone
+                    _pair_txt = (f"對應 {_pw + _px} 台（以網頁 {_pw}、以 Excel {_px}）" if _pw + _px else "對應 0 台")
+                    if st.button(f"✅ 合併：新增 {_pn} 台、{_pair_txt}、更新 {len(_picked) - _pn_items} 台、"
                                  f"補填 {len(_fill_list)} 台",
                                  type="primary", use_container_width=True, key="merge_apply"):
                         n_add, n_upd, n_fil, n_par = apply_excel_merge(st.session_state["db"], _xl,
                                                                        _picked + _pair_pick, _fill_list)
                         save_json(st.session_state["db"])
-                        log_activity("Excel 合併匯入", f"{_mg_up.name}：新增 {n_add} 台、對應 {n_par} 台、更新 {n_upd} 台、"
+                        log_activity("Excel 合併匯入", f"{_mg_up.name}：新增 {n_add} 台、{_pair_txt}、更新 {n_upd} 台、"
                                      f"補填 {n_fil} 台，目前共 {len(st.session_state['db'])} 台")
-                        _flash = (f"✅ 已合併：新增 {n_add} 台、對應 {n_par} 台、更新 {n_upd} 台、補填 {n_fil} 台，"
+                        _flash = (f"✅ 已合併：新增 {n_add} 台、{_pair_txt}、更新 {n_upd} 台、補填 {n_fil} 台，"
                                   f"目前共 {len(st.session_state['db'])} 台。目前只存在這台伺服器，請到同步頁按「上傳到 Supabase」存到雲端。")
-                        if n_par:
+                        if any(p_["kind"] == "pair" and _has_real_code(_xl[p_["xl"]])
+                               and _mnorm(_xl[p_["xl"]].get("設備編號")) != _mnorm(_db[p_["db"]].get("設備編號"))
+                               for p_ in _pair_pick):
                             _flash += "（有改編號的設備，上傳時會用新檔名重傳照片，會比平常久一些）"
                         st.session_state["merge_flash"] = _flash
                         st.session_state["merge_parse"] = None; st.session_state["merge_sel"] = None
