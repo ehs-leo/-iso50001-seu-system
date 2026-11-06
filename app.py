@@ -2766,6 +2766,10 @@ def _render_equipment_detail(r, db_idx, loop_idx):
             up2 = st.file_uploader("更新銘牌照片", type=["jpg","jpeg","png"], key=f"u2_{loop_idx}_{db_idx}")
             up2b = st.file_uploader("新增/更新銘牌照片2（選填，第2個馬達名牌）",
                                      type=["jpg","jpeg","png"], key=f"u2b_{loop_idx}_{db_idx}")
+            # 上傳時若瀏覽器與伺服器的即時連線（WebSocket）剛好斷掉，伺服器會回 400「Invalid session_id」，
+            # 畫面一直轉圈；連線幾秒內會自動接回，移除後重選即可（另以 .streamlit/config.toml 的
+            # websocketPingInterval 讓連線保持不斷，減少發生次數）。
+            st.caption("📶 轉圈超過 10 秒沒好，代表連線剛好斷掉：按檔名旁的 ⓧ 移除，再重新選一次照片即可。")
             sv, cp, dl = st.columns([3,2,1])
             with sv: save_ok = st.form_submit_button("💾 儲存變更", use_container_width=True)
             with cp: copy_ok = st.form_submit_button("📋 複製為新設備", use_container_width=True)
