@@ -3856,7 +3856,7 @@ elif "能源換算" in menu:
 # ─────────────────────────────────────────────────────────────────────────────
 elif "負載" in menu:
     st.subheader("📈 全廠 24 小時電力負載曲線")
-    st.info("統計區間：2024 年 6/11 – 10/18（共 95 天尖峰期）")
+    st.info("統計區間：台電用電分析・第2類（工作日型）共 206 天")
 
     # 「標題」設定同時控制：圖表標題文字、下方數字方塊（st.metric）的字體大小。
     _ldtsz = st.session_state.get("fmt", {}).get("load_title_size", 16)
@@ -3866,16 +3866,18 @@ elif "負載" in menu:
     </style>
     """, unsafe_allow_html=True)
 
+    # 資料來源：台電用電分析「第2類，計206天」（工作日型）。
+    # 平均＝台電網頁滑鼠提示的精確值；最高／最低＝該圖灰線上緣／下緣逐小時目測（約 ±5 kW）。
+    # （v3.6 前為 2024 年 6/11–10/18 尖峰期 95 天，平均以（最高＋最低）÷ 2 估算）
     df_load = pd.DataFrame({
         "時間(時)": list(range(1, 25)),
-        "最高用電(kW)": [135,130,127,126,125,128,194,278,362,384,388,399,
-                         377,386,389,381,372,302,226,158,142,141,136,135],
-        "最低用電(kW)": [105,101,97,97,96,98,183,245,309,333,337,343,
-                         319,329,333,325,316,257,196,120,110,108,104,103],
+        "最高用電(kW)": [156,150,147,147,149,154,208,261,328,341,341,331,
+                         295,334,373,380,374,329,267,172,163,159,157,153],
+        "最低用電(kW)": [75,81,77,74,75,83,101,90,97,84,59,30,
+                         21,62,89,114,137,113,96,61,59,58,55,51],
+        "平均用電(kW)": [114,113,110,108,108,115,156,180,203,191,175,178,
+                         156,187,213,238,258,222,181,127,121,119,115,112],
     })
-    df_load["平均用電(kW)"] = (
-        (df_load["最高用電(kW)"] + df_load["最低用電(kW)"]) / 2
-    ).round(1)
 
     _ldcf = st.session_state.get("fmt", {}).get("load_chart_font_size", 13)
     fig = go.Figure()
@@ -3908,17 +3910,24 @@ elif "負載" in menu:
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    pk = df_load.loc[df_load["最高用電(kW)"].idxmax()]
-    of = df_load.loc[df_load["最低用電(kW)"].idxmin()]
+    # 尖峰／離峰以平均線判斷（代表一般工作日），下方小字另列最高／最低線的極端值
+    pk = df_load.loc[df_load["平均用電(kW)"].idxmax()]
+    of = df_load.loc[df_load["平均用電(kW)"].idxmin()]
+    xp = df_load.loc[df_load["最高用電(kW)"].idxmax()]
+    xo = df_load.loc[df_load["最低用電(kW)"].idxmin()]
     pa, pb, pc = st.columns(3)
-    pa.metric("🔺 尖峰時段", f"{int(pk['時間(時)'])}:00", f"{pk['最高用電(kW)']} kW")
-    pb.metric("🔻 離峰時段", f"{int(of['時間(時)'])}:00", f"{of['最低用電(kW)']} kW")
+    pa.metric("🔺 尖峰時段", f"{int(pk['時間(時)'])}:00", f"{int(pk['平均用電(kW)'])} kW")
+    pa.caption(f"最高 {int(xp['最高用電(kW)'])} kW（{int(xp['時間(時)'])}:00）")
+    pb.metric("🔻 離峰時段", f"{int(of['時間(時)'])}:00", f"{int(of['平均用電(kW)'])} kW")
+    pb.caption(f"最低 {int(xo['最低用電(kW)'])} kW（{int(xo['時間(時)'])}:00）")
     pc.metric("📊 負載差異",
-              f"{pk['最高用電(kW)'] - of['最低用電(kW)']} kW",
-              f"比值 {round(pk['最高用電(kW)']/of['最低用電(kW)'],2):.2f}x")
+              f"{int(pk['平均用電(kW)'] - of['平均用電(kW)'])} kW",
+              f"比值 {pk['平均用電(kW)'] / of['平均用電(kW)']:.2f}x")
+    pc.caption("以平均線計算")
 
     st.divider()
-    centered_table(df_load, context="load")
+    # 表格的時間欄顯示成「1點」「2點」…（圖表與 CSV 仍用數字）
+    centered_table(df_load.assign(**{"時間(時)": df_load["時間(時)"].map(lambda h: f"{h}點")}), context="load")
     st.download_button(
         "⬇️ 下載負載曲線 CSV",
         df_load.to_csv(index=False).encode("utf-8-sig"),
