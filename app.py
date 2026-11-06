@@ -2409,7 +2409,7 @@ _draw_sidebar_status()
 _HDR_DEFAULTS = {
     "hdr_company": "永寬化學股份有限公司",
     "hdr_system":  "重大能源使用設備 (SEUs) 網頁版管理系統",
-    "hdr_info":    "系統邊界：雲林縣斗六市榴南里　｜　樓地板面積：12,378.27 ㎡　｜　ISO 50001:2018",
+    "hdr_info":    "系統邊界：雲林縣斗六市榴南里\n樓地板面積：12,378.27 ㎡　｜　ISO 50001:2018",   # 資訊列可多行
 }
 
 def _hdr_texts(src=None):
@@ -2419,6 +2419,8 @@ def _hdr_texts(src=None):
 
 def _banner_html(t):
     e = _html.escape
+    # 資訊列每一行（輸入框裡按 Enter）在橫幅換一行；空行略過（空行會讓 HTML 區塊斷掉）
+    _info_html = "<br>".join(e(ln.strip()) for ln in str(t["hdr_info"]).replace("\r\n", "\n").split("\n") if ln.strip())
     return f"""
 <div style='background:#f8fafc;padding:16px 22px;border-radius:10px;
             border-left:5px solid #1a3a5c;margin-bottom:18px'>
@@ -2427,7 +2429,7 @@ def _banner_html(t):
     {e(t["hdr_system"])}
   </h3>
   <p style='margin:6px 0 0;color:#64748b;font-size:11px;line-height:1.6'>
-    {e(t["hdr_info"])}
+    {_info_html}
   </p>
 </div>
 """
@@ -4901,7 +4903,9 @@ elif "版面格式" in menu:
             st.success(_hm)
         _hcur = _hdr_texts(fmt)
         _hlab = {"hdr_company": "公司名稱", "hdr_system": "系統名稱", "hdr_info": "資訊列"}
-        _hin = {k: st.text_input(_hlab[k], value=_hcur[k], key=f"w_{k}") for k in _HDR_DEFAULTS}
+        _hin = {k: (st.text_area(_hlab[k] + "（每按一次 Enter 換一行）", value=_hcur[k], key=f"w_{k}", height=90)
+                    if k == "hdr_info" else st.text_input(_hlab[k], value=_hcur[k], key=f"w_{k}"))
+                for k in _HDR_DEFAULTS}
         st.caption("預覽")
         st.markdown(_banner_html(_hdr_texts(_hin)), unsafe_allow_html=True)
         st.caption("資訊列只是文字；儀表板「廠區樓地板面積」的數字不會跟著改。")
