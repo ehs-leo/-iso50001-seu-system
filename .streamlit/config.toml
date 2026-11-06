@@ -1,4 +1,0 @@
-   [server]
-   # 伺服器每 15 秒對瀏覽器發一次訊號，避免閒置的即時連線（WebSocket）被網路設備切斷，
-   # 造成照片上傳回 400「Invalid session_id」一直轉圈。
-   websocketPingInterval = 15
