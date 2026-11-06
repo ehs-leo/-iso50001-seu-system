@@ -2404,18 +2404,35 @@ _draw_sidebar_status()
 # ─────────────────────────────────────────────────────────────────────────────
 # 7. 頂部標題 + 模式橫幅
 # ─────────────────────────────────────────────────────────────────────────────
-st.markdown("""
+# 三行文字可在「版面格式設定」頁編輯（存在 fmt：hdr_company／hdr_system／hdr_info），套用所有分頁；
+# 沒設定或清空時用預設文字。注意：資訊列只是文字，儀表板「廠區樓地板面積」數字用的是 FLOOR_AREA，不會連動。
+_HDR_DEFAULTS = {
+    "hdr_company": "永寬化學股份有限公司",
+    "hdr_system":  "重大能源使用設備 (SEUs) 網頁版管理系統",
+    "hdr_info":    "系統邊界：雲林縣斗六市榴南里　｜　樓地板面積：12,378.27 ㎡　｜　ISO 50001:2018",
+}
+
+def _hdr_texts(src=None):
+    """取得橫幅三行文字（src 給 dict 時用它，否則用目前的版面設定）；空白一律改回預設"""
+    src = st.session_state.get("fmt", {}) if src is None else src
+    return {k: (str(src.get(k) or "").strip() or v) for k, v in _HDR_DEFAULTS.items()}
+
+def _banner_html(t):
+    e = _html.escape
+    return f"""
 <div style='background:#f8fafc;padding:16px 22px;border-radius:10px;
             border-left:5px solid #1a3a5c;margin-bottom:18px'>
-  <h1 style='margin:0;color:#1a3a5c;font-size:22px'>永寬化學股份有限公司</h1>
+  <h1 style='margin:0;color:#1a3a5c;font-size:22px'>{e(t["hdr_company"])}</h1>
   <h3 style='margin:5px 0 0;color:#475569;font-size:14px;font-weight:normal'>
-    重大能源使用設備 (SEUs) 網頁版管理系統
+    {e(t["hdr_system"])}
   </h3>
   <p style='margin:6px 0 0;color:#64748b;font-size:11px;line-height:1.6'>
-    系統邊界：雲林縣斗六市榴南里　｜　樓地板面積：12,378.27 ㎡　｜　ISO 50001:2018
+    {e(t["hdr_info"])}
   </p>
 </div>
-""", unsafe_allow_html=True)
+"""
+
+st.markdown(_banner_html(_hdr_texts()), unsafe_allow_html=True)
 
 if st.session_state.get("logged_in"):
     if st.session_state.get("cloud_offline"):
@@ -4877,6 +4894,38 @@ elif "版面格式" in menu:
     st.info("調整後即時套用至全站，並自動儲存，重新整理或重新部署後仍會保留。")
 
     fmt = st.session_state["fmt"]
+
+    # ── 頂部標題橫幅（套用所有分頁）：按「儲存」才生效；預覽依輸入框即時更新
+    with st.expander("🏷️ 頂部標題橫幅（套用所有分頁）", expanded=True):
+        if _hm := st.session_state.pop("hdr_flash", None):
+            st.success(_hm)
+        _hcur = _hdr_texts(fmt)
+        _hlab = {"hdr_company": "公司名稱", "hdr_system": "系統名稱", "hdr_info": "資訊列"}
+        _hin = {k: st.text_input(_hlab[k], value=_hcur[k], key=f"w_{k}") for k in _HDR_DEFAULTS}
+        st.caption("預覽")
+        st.markdown(_banner_html(_hdr_texts(_hin)), unsafe_allow_html=True)
+        st.caption("資訊列只是文字；儀表板「廠區樓地板面積」的數字不會跟著改。")
+        _hc1, _hc2, _ = st.columns([1, 1, 3])
+        if _hc1.button("💾 儲存", key="hdr_save", type="primary", use_container_width=True):
+            for k, v in _hin.items():
+                v = v.strip()
+                if v and v != _HDR_DEFAULTS[k]:
+                    fmt[k] = v
+                else:
+                    fmt.pop(k, None)
+                st.session_state.pop(f"w_{k}", None)
+            save_layout(fmt)
+            log_activity("編輯頂部標題橫幅", "；".join(f"{_hlab[k]}：{fmt.get(k, '（預設）')}" for k in _hlab))
+            st.session_state["hdr_flash"] = "✅ 已儲存，所有分頁的頂部標題已更新"
+            st.rerun()
+        if _hc2.button("↺ 恢復預設", key="hdr_reset", use_container_width=True):
+            for k in _HDR_DEFAULTS:
+                fmt.pop(k, None)
+                st.session_state.pop(f"w_{k}", None)
+            save_layout(fmt)
+            log_activity("編輯頂部標題橫幅", "恢復預設文字")
+            st.session_state["hdr_flash"] = "✅ 已恢復預設文字"
+            st.rerun()
 
     FONTS = [
         "Noto Sans TC",
