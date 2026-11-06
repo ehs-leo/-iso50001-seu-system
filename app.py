@@ -3910,20 +3910,22 @@ elif "負載" in menu:
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # 尖峰／離峰以平均線判斷（代表一般工作日），下方小字另列最高／最低線的極端值
+    # 用電最多／最少的時段以平均線判斷（代表一般工作日），下方小字另列 206 天中的單日極端值。
+    # 不用「尖峰／離峰」字樣，避免和台電電價的尖峰／離峰時段混淆；灰色標籤、不顯示箭頭（delta_arrow 需 Streamlit 1.56 以上）。
     pk = df_load.loc[df_load["平均用電(kW)"].idxmax()]
     of = df_load.loc[df_load["平均用電(kW)"].idxmin()]
     xp = df_load.loc[df_load["最高用電(kW)"].idxmax()]
     xo = df_load.loc[df_load["最低用電(kW)"].idxmin()]
     pa, pb, pc = st.columns(3)
-    pa.metric("🔺 尖峰時段", f"{int(pk['時間(時)'])}:00", f"{int(pk['平均用電(kW)'])} kW")
-    pa.caption(f"最高 {int(xp['最高用電(kW)'])} kW（{int(xp['時間(時)'])}:00）")
-    pb.metric("🔻 離峰時段", f"{int(of['時間(時)'])}:00", f"{int(of['平均用電(kW)'])} kW")
-    pb.caption(f"最低 {int(xo['最低用電(kW)'])} kW（{int(xo['時間(時)'])}:00）")
-    pc.metric("📊 負載差異",
-              f"{int(pk['平均用電(kW)'] - of['平均用電(kW)'])} kW",
-              f"比值 {pk['平均用電(kW)'] / of['平均用電(kW)']:.2f}x")
-    pc.caption("以平均線計算")
+    pa.metric("⚡ 用電最多的時段", f"{int(pk['時間(時)'])}:00", f"平均需量 {int(pk['平均用電(kW)'])} kW",
+              delta_color="off", delta_arrow="off")
+    pa.caption(f"206 天中單日最高：{int(xp['最高用電(kW)'])} kW（{int(xp['時間(時)'])}:00）")
+    pb.metric("🌙 用電最少的時段", f"{int(of['時間(時)'])}:00", f"平均需量 {int(of['平均用電(kW)'])} kW",
+              delta_color="off", delta_arrow="off")
+    pb.caption(f"206 天中單日最低：{int(xo['最低用電(kW)'])} kW（{int(xo['時間(時)'])}:00）")
+    pc.metric("📊 日間與夜間落差", f"{int(pk['平均用電(kW)'] - of['平均用電(kW)'])} kW",
+              f"約 {pk['平均用電(kW)'] / of['平均用電(kW)']:.2f} 倍", delta_color="off", delta_arrow="off")
+    pc.caption(f"{int(pk['時間(時)'])}:00 平均 ÷ {int(of['時間(時)'])}:00 平均")
 
     st.divider()
     # 表格的時間欄顯示成「1點」「2點」…（圖表與 CSV 仍用數字）
