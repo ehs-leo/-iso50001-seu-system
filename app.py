@@ -3855,8 +3855,44 @@ elif "能源換算" in menu:
 # ── 頁面三：每日負載分析
 # ─────────────────────────────────────────────────────────────────────────────
 elif "負載" in menu:
-    st.subheader("📈 全廠 24 小時電力負載曲線")
-    st.info("統計區間：台電用電分析・第2類（工作日型）共 206 天")
+    # 本頁三處文字可在修改模式編輯，存在版面格式設定（fmt，本地 layout_settings.json ＋ 雲端 layout_settings 表）；
+    # 欄位清空後儲存會改回預設文字，避免出現空白標題。
+    _LOAD_TXT_DEFAULTS = {
+        "load_txt_title": "📈 全廠 24 小時電力負載曲線",
+        "load_txt_info":  "統計區間：台電用電分析・第2類（工作日型）共 206 天",
+        "load_txt_chart": "廠區 24 小時尖離峰電力負載分佈",
+    }
+    _fmt_l = st.session_state.setdefault("fmt", {})
+    _ltxt = {k: (str(_fmt_l.get(k) or "").strip() or v) for k, v in _LOAD_TXT_DEFAULTS.items()}
+    if st.session_state["edit_mode"]:
+        if _lt_msg := st.session_state.pop("load_txt_flash", None):
+            st.success(_lt_msg)
+        with st.expander("✏️ 編輯本頁標題文字"):
+            _lt_labels = {"load_txt_title": "頁面大標題", "load_txt_info": "藍色提示", "load_txt_chart": "圖表標題"}
+            _lt_in = {k: st.text_input(_lt_labels[k], value=_ltxt[k], key=f"w_{k}") for k in _LOAD_TXT_DEFAULTS}
+            _ltc1, _ltc2, _ = st.columns([1, 1, 3])
+            if _ltc1.button("💾 儲存", key="load_txt_save", type="primary", use_container_width=True):
+                for k, v in _lt_in.items():
+                    v = v.strip()
+                    if v and v != _LOAD_TXT_DEFAULTS[k]:
+                        _fmt_l[k] = v
+                    else:
+                        _fmt_l.pop(k, None)
+                    st.session_state.pop(f"w_{k}", None)
+                save_layout(_fmt_l)
+                log_activity("編輯每日負載分析頁文字", "；".join(f"{_lt_labels[k]}：{_fmt_l.get(k, '（預設）')}" for k in _lt_labels))
+                st.session_state["load_txt_flash"] = "✅ 已儲存本頁標題文字"
+                st.rerun()
+            if _ltc2.button("↺ 恢復預設", key="load_txt_reset", use_container_width=True):
+                for k in _LOAD_TXT_DEFAULTS:
+                    _fmt_l.pop(k, None)
+                    st.session_state.pop(f"w_{k}", None)
+                save_layout(_fmt_l)
+                log_activity("編輯每日負載分析頁文字", "恢復預設文字")
+                st.session_state["load_txt_flash"] = "✅ 已恢復預設文字"
+                st.rerun()
+    st.subheader(_ltxt["load_txt_title"])
+    st.info(_ltxt["load_txt_info"])
 
     # 「標題」設定同時控制：圖表標題文字、下方數字方塊（st.metric）的字體大小。
     _ldtsz = st.session_state.get("fmt", {}).get("load_title_size", 16)
@@ -3898,7 +3934,7 @@ elif "負載" in menu:
         fill="tonexty", fillcolor="rgba(37,99,168,.06)"
     ))
     fig.update_layout(
-        title=dict(text="廠區 24 小時尖離峰電力負載分佈",
+        title=dict(text=_ltxt["load_txt_chart"],
                    font=dict(size=_ldtsz)),
         xaxis=dict(title="時間（時）", tickmode="linear", tick0=1, dtick=1,
                    tickfont=dict(size=_ldcf), title_font=dict(size=_ldcf)),
