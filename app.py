@@ -3501,18 +3501,28 @@ elif "設備盤查" in menu:
             cols += [("外觀照片", 1.0), ("銘牌照片", 1.0)]
         widths = [w for _, w in cols]
 
+        # v3.7：畫面變窄時等比例縮小（字體與內距跟著清單寬度縮放，排版不變）。
+        # 以清單寬度 _EQ_REF_W px 為基準：寬度 ≥ 基準時用版面設定的字體大小（最大值），變窄時按比例縮小，
+        # 最小 _EQ_MIN_FS px，避免小到看不見；欄位也不再因 Streamlit 的手機版規則改成上下排列。
+        _EQ_REF_W, _EQ_MIN_FS = 1500, 10
+        _k = fs / _EQ_REF_W
+        _fz = f"clamp({min(_EQ_MIN_FS, fs)}px, calc(100cqw * {_k:.6f}), {fs}px)"
+        _pv = "clamp(2px, calc(100cqw * 0.0053), 8px)"      # 上下內距：基準寬度時 8px
+        _ph = "clamp(3px, calc(100cqw * 0.0067), 10px)"     # 左右內距：基準寬度時 10px
         st.markdown(f"""
         <style>
-        .st-key-eq_tbl [data-testid="stHorizontalBlock"] {{ gap:0 !important; border-bottom:1px solid #e2e8f0; }}
+        .st-key-eq_tbl {{ container-type: inline-size; }}
+        .st-key-eq_tbl [data-testid="stHorizontalBlock"] {{ gap:0 !important; border-bottom:1px solid #e2e8f0;
+            flex-wrap:nowrap !important; }}
         .st-key-eq_tbl [data-testid="stColumn"] {{ padding:0 !important; min-width:0 !important; }}
-        .st-key-eq_tbl .eqc {{ font-size:{fs}px; text-align:{align}; padding:8px 10px; color:#1e293b; overflow-wrap:anywhere; }}
-        .st-key-eq_tbl .eqh {{ background:#1a3a5c; color:#fff; font-weight:700; padding:10px; }}
-        .st-key-eq_tbl div[data-testid="stButton"] {{ width:100%; padding:4px 10px; }}
+        .st-key-eq_tbl .eqc {{ font-size:{_fz}; text-align:{align}; padding:{_pv} {_ph}; color:#1e293b; overflow-wrap:anywhere; }}
+        .st-key-eq_tbl .eqh {{ background:#1a3a5c; color:#fff; font-weight:700; padding:{_pv} {_ph}; }}
+        .st-key-eq_tbl div[data-testid="stButton"] {{ width:100%; padding:calc({_pv} / 2) {_ph}; }}
         .st-key-eq_tbl div[data-testid="stButton"] button {{
-            border:1px solid #b8b8b2; border-radius:6px; background:#fff; min-height:0; padding:3px 12px;
+            border:1px solid #b8b8b2; border-radius:6px; background:#fff; min-height:0; padding:calc({_pv} / 2.5) {_ph};
             width:100% !important; justify-content:{flex}; }}
         .st-key-eq_tbl div[data-testid="stButton"] button [data-testid="stMarkdownContainer"] {{ width:100%; text-align:{align}; }}
-        .st-key-eq_tbl div[data-testid="stButton"] button p {{ font-size:{fs}px !important; color:#0C447C !important;
+        .st-key-eq_tbl div[data-testid="stButton"] button p {{ font-size:{_fz} !important; color:#0C447C !important;
             text-align:{align}; width:100%; }}
         .st-key-eq_tbl div[data-testid="stButton"] button:hover {{ background:#eff6ff; border-color:#378ADD; }}
         </style>
