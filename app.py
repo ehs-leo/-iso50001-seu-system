@@ -1578,9 +1578,70 @@ def load_json():
             pass
     return None
 
-def save_json(data):
+def save_json(data, mark_dirty=True):
+    """寫入伺服器上的共用存檔。mark_dirty=True（預設，編輯、合併、還原等）代表這份存檔和雲端不同、尚未上傳；
+    從雲端下載或上傳成功後寫入時傳 False，存檔仍視為與雲端同一版。"""
     with open(DB_JSON, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, default=str)
+    if mark_dirty:
+        _m = load_equip_meta()
+        _m["dirty"] = True
+        _m["dirty_at"] = datetime.now().strftime("%m/%d %H:%M")
+        _write_equip_meta(_m)
+
+# ── 雲端版本號（v3.7）：每個人開網頁時先核對「本地存檔是不是雲端最新版」，不同才下載 ──
+# 雲端：layout_settings 資料表 id=2 那一列的 settings.equip_version（每次上傳設備資料成功後更新，不需新增欄位）
+# 本地：EQUIP_META_JSON 記錄本地存檔對應的雲端版本與是否有未上傳的修改（dirty）
+EQUIP_META_JSON = "equipment_db_meta.json"
+EQUIP_VERSION_ROW_ID = 2
+
+def load_equip_meta():
+    try:
+        with open(EQUIP_META_JSON, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+def _write_equip_meta(m):
+    try:
+        with open(EQUIP_META_JSON, "w", encoding="utf-8") as f:
+            json.dump(m, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+def save_equip_meta(version):
+    """本地存檔剛和雲端同步（下載或上傳成功）：記下對應的雲端版本，並清除未上傳標記"""
+    _write_equip_meta({"version": version, "dirty": False})
+
+def get_cloud_equip_version():
+    """回傳 (版本字串, 錯誤)。沒設定 Supabase → (None, None)；雲端還沒有版本號 → ("", None)；連線失敗 → (None, 錯誤)"""
+    sb = get_supabase_client()
+    if not sb:
+        return None, None
+    try:
+        rows = sb.table("layout_settings").select("settings").eq("id", EQUIP_VERSION_ROW_ID).execute().data or []
+        return (str((rows[0].get("settings") or {}).get("equip_version") or "") if rows else ""), None
+    except Exception as e:
+        return None, f"{type(e).__name__}：{str(e)[:120]}"
+
+def set_cloud_equip_version(version):
+    sb = get_supabase_client()
+    if not sb:
+        return False
+    try:
+        sb.table("layout_settings").upsert(
+            {"id": EQUIP_VERSION_ROW_ID, "settings": {"equip_version": version}}, on_conflict="id").execute()
+        return True
+    except Exception:
+        return False
+
+def _new_equip_version():
+    return datetime.now().strftime("%Y%m%d%H%M%S") + "-" + os.urandom(2).hex()
+
+def _fmt_equip_version(v):
+    """20261113052301-ab12 → 11/13 05:23"""
+    v = str(v or "")
+    return f"{v[4:6]}/{v[6:8]} {v[8:10]}:{v[10:12]}" if len(v) >= 12 and v[:12].isdigit() else ""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3-0. 版面格式設定與操作日誌持久化
@@ -2022,10 +2083,47 @@ if "fmt" not in st.session_state:
         "font_family": "Noto Sans TC",
     }
 if "db" not in st.session_state:
+    # v3.7：每次開網頁先核對雲端版本號（很小的請求）——
+    #   本地存檔＝雲端同一版、且沒有未上傳的修改 → 直接用本地存檔（快、不耗流量），標示「雲端（已核對）」
+    #   本地沒有存檔、版本不同、或本地有未上傳的修改 → 從雲端下載；本地有未上傳修改時不覆蓋共用存檔，
+    #     只提醒管理員（管理員可選擇載入本地存檔繼續編輯）
+    #   雲端查不到版本（連線失敗）→ 照舊：有本地存檔用本地，沒有就用內建資料並顯示重新連線紅框
     saved = load_json()
-    if saved:
+    _meta = load_equip_meta()
+    _cv, _cv_err = (None, "啟動前檢查連不上雲端") if _SB_FAST_DEAD else get_cloud_equip_version()
+    _dirty = bool(saved is not None and _meta.get("dirty"))
+    if saved is not None and _cv is not None and _meta.get("version") is not None \
+            and _meta.get("version") == _cv and not _dirty:
         st.session_state["db"] = saved
-        st.session_state["data_source"] = "local"        # 本地存檔：不確定上次是否已上傳，沒有同步基準
+        st.session_state["data_source"] = "cloud"
+        st.session_state["cloud_version"] = _cv
+        st.session_state["synced_sigs"] = _sync_sigs(saved)
+    elif _cv is not None:
+        from_supabase, _err = pull_equipment_from_supabase()
+        if from_supabase:
+            st.session_state["db"] = from_supabase
+            st.session_state["data_source"] = "cloud"
+            st.session_state["cloud_version"] = _cv
+            st.session_state["synced_sigs"] = _sync_sigs(from_supabase)
+            if _dirty:
+                st.session_state["local_dirty_pending"] = _meta.get("dirty_at") or "?"
+            else:
+                save_json(from_supabase, mark_dirty=False)   # 順便寫回本地，當作之後開網頁的快取
+                save_equip_meta(_cv)
+        elif saved is not None:
+            st.session_state["db"] = saved
+            st.session_state["data_source"] = "local"
+            st.session_state["synced_sigs"] = None
+        else:
+            if _err and str(_err).startswith("下載失敗"):
+                st.session_state["cloud_offline"] = _err
+            builtin = get_builtin_data()
+            st.session_state["db"] = builtin if builtin else init_from_excel()
+            st.session_state["data_source"] = "builtin" if builtin else "excel"
+            st.session_state["synced_sigs"] = None
+    elif saved is not None:
+        st.session_state["db"] = saved
+        st.session_state["data_source"] = "local"        # 雲端查不到版本（或沒設定 Supabase）：沒有同步基準
         st.session_state["synced_sigs"] = None
     else:
         # 本地檔案不存在（例如剛重新部署過）：先試著從 Supabase 抓回上次的資料，
@@ -2035,7 +2133,7 @@ if "db" not in st.session_state:
             st.session_state["db"] = from_supabase
             st.session_state["data_source"] = "cloud"
             st.session_state["synced_sigs"] = _sync_sigs(from_supabase)
-            save_json(from_supabase)   # 順便寫回本地，當作這次 session 的快取
+            save_json(from_supabase, mark_dirty=False)   # 順便寫回本地，當作這次 session 的快取
         else:
             # 雲端「連不上」（逾時、Supabase 暫停、網路不通）與「資料表是空的／沒設定」不同：
             # 前者要提醒管理員目前顯示的是沒有雲端照片的內建資料，不要在這個狀態下編輯或上傳。
@@ -2416,7 +2514,8 @@ with st.sidebar:
 def _draw_sidebar_status():
     # 整塊狀態只用「一個」markdown 元素畫進預留位置：重畫時新舊元素一對一替換，不會殘留舊的提醒。
     _src = st.session_state.get("data_source", "local")
-    _lab, _col = {"cloud": ("☁️ 雲端", "#1D9E75"), "local": ("💾 本地存檔", "#BA7517"), "builtin": ("📦 內建資料", "#E24B4A"),
+    _lab, _col = {"cloud": ("☁️ 雲端" + (f"（已核對 {_fmt_equip_version(st.session_state.get('cloud_version'))} 版）"
+                             if _fmt_equip_version(st.session_state.get("cloud_version")) else ""), "#1D9E75"), "local": ("💾 本地存檔", "#BA7517"), "builtin": ("📦 內建資料", "#E24B4A"),
                   "excel": ("📄 Excel 載入", "#378ADD"), "backup": ("🗂️ 備份還原", "#378ADD")}.get(_src, ("？ 未知", "#888888"))
     _html = (f"<div style='font-size:13px;color:#cbd9e8;margin:2px 0'>資料來源：<span style='background:{_col};color:#fff;"
              f"border-radius:10px;padding:1px 8px'>{_lab}</span></div>")
@@ -2490,15 +2589,18 @@ if st.session_state.get("cloud_offline"):
                        use_container_width=True, key="cloud_retry", disabled=_wait > 0):
             st.session_state["cloud_retry_at"] = _time.time()
             with st.spinner("重新連線雲端並下載設備資料（含照片）…"):
+                _rv, _ = get_cloud_equip_version()
                 _rd, _re = pull_equipment_from_supabase()
             if _rd:
                 st.session_state["db"] = _rd
                 st.session_state["data_source"] = "cloud"
                 st.session_state["synced_sigs"] = _sync_sigs(_rd)
+                st.session_state["cloud_version"] = _rv
                 st.session_state.pop("cloud_offline", None)
                 st.session_state.pop("cloud_retry_err", None)
                 if st.session_state.get("logged_in"):          # 只有管理員才寫入共用存檔與操作日誌
-                    save_json(_rd)
+                    save_json(_rd, mark_dirty=False)
+                    save_equip_meta(_rv)
                     log_activity("重新連線雲端", f"已從雲端載入 {len(_rd)} 台設備")
                 _miss = st.session_state.get("cloud_photo_missing")
                 st.session_state["cloud_retry_flash"] = (f"✅ 已重新連上雲端，載入 {len(_rd)} 台設備。"
@@ -2510,6 +2612,24 @@ if st.session_state.get("cloud_offline"):
         _rc2.caption((st.session_state.get("cloud_retry_err") or f"啟動時的錯誤：{st.session_state['cloud_offline']}")
                      + ("。為避免重複下載全部照片，每次重試後要等 60 秒才能再按" if _wait > 0 else "")
                      + "。也可以稍後關掉分頁重新開啟，或在 Streamlit 按 Reboot app。")
+
+# v3.7：開網頁時伺服器存檔有「尚未上傳的修改」→ 畫面改用雲端版；只提醒管理員，可選擇載入本地存檔繼續編輯
+if st.session_state.get("logged_in") and st.session_state.get("local_dirty_pending"):
+    with st.container(border=True):
+        st.warning(f"⚠️ 伺服器上有一份**尚未上傳到雲端的修改**（本地存檔，最後修改 {st.session_state['local_dirty_pending']}）。"
+                   "目前畫面是雲端版；要繼續編輯那份修改，請按下方按鈕載入，編輯完記得上傳到 Supabase。"
+                   "若不需要那份修改，直接在雲端版上作業並上傳即可（上傳後那份未上傳的修改就會被取代）。")
+        if st.button("📂 載入本地存檔（含未上傳的修改）", key="load_dirty_local"):
+            _ld = load_json()
+            if _ld is not None:
+                st.session_state["db"] = _ld
+                st.session_state["data_source"] = "local"      # synced_sigs 維持雲端版 → 側邊欄會顯示有幾項修改尚未上傳
+                st.session_state.pop("local_dirty_pending", None)
+                log_activity("載入本地存檔", f"載入尚未上傳的本地存檔（{len(_ld)} 台）")
+                st.rerun()
+            else:
+                st.error("❌ 找不到本地存檔（可能伺服器剛重新啟動過）。")
+                st.session_state.pop("local_dirty_pending", None)
 
 if st.session_state.get("logged_in"):
     if st.session_state.get("cloud_offline"):
@@ -4757,6 +4877,15 @@ elif "Excel" in menu:
                                      + (f"；{_vline.replace('⚠️ ', '')}" if _vline else ""))
                         st.session_state["data_source"] = "cloud"                      # 上傳成功 → 雲端與目前畫面一致
                         st.session_state["synced_sigs"] = _sync_sigs(st.session_state["db"])
+                        # v3.7：更新雲端版本號，並把這份資料寫成本地存檔（與雲端同一版、沒有未上傳修改）
+                        _nv = _new_equip_version()
+                        _v_ok = set_cloud_equip_version(_nv)
+                        save_json(st.session_state["db"], mark_dirty=False)
+                        save_equip_meta(_nv if _v_ok else None)
+                        st.session_state["cloud_version"] = _nv if _v_ok else None
+                        st.session_state.pop("local_dirty_pending", None)
+                        if not _v_ok:
+                            st.warning("⚠️ 資料已上傳，但雲端版本號沒寫入成功：其他人下次開網頁會多下載一次，不影響資料。可再上傳一次補上。")
                         _draw_sidebar_status()
                         st.session_state.pop("cloud_offline", None)
                         if pre:
@@ -4822,6 +4951,7 @@ elif "Excel" in menu:
             with c2:
                 if st.button("⬇️ 從 Supabase 下載設備資料", use_container_width=True, key="sb_pull_equip"):
                     with st.spinner("下載中，含照片可能需要一點時間…"):
+                        _dl_v, _ = get_cloud_equip_version()      # 先取版本號再下載：下載期間若有人上傳，下次開網頁會再核對到新版
                         data, err = pull_equipment_from_supabase()
                     if err:
                         st.error(f"❌ {err}")
@@ -4831,8 +4961,11 @@ elif "Excel" in menu:
                         st.session_state["data_source"] = "cloud"
                         st.session_state["synced_sigs"] = _sync_sigs(data)
                         st.session_state["cloud_verify"] = None
+                        st.session_state["cloud_version"] = _dl_v
+                        st.session_state.pop("local_dirty_pending", None)
                         _draw_sidebar_status()
-                        save_json(data)
+                        save_json(data, mark_dirty=False)
+                        save_equip_meta(_dl_v)
                         log_activity("Supabase下載", f"設備資料：共 {len(data)} 筆")
                         st.success(f"✅ 已下載 {len(data)} 筆設備資料！")
                         st.rerun()
@@ -4844,7 +4977,7 @@ elif "Excel" in menu:
                 if _cnt is None:
                     st.error(f"❌ {_msg}")
                 else:
-                    save_json(st.session_state["db"])
+                    save_json(st.session_state["db"], mark_dirty=False)   # 補回的是雲端既有照片，不算未上傳的修改
                     _total = sum(_cnt.values())
                     log_activity("Supabase補回照片", f"{_msg}；補回 {_total} 張")
                     st.success(f"✅ {_msg}；共補回 {_total} 張"
