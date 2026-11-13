@@ -1034,6 +1034,42 @@ def verify_cloud_photos(sb, records):
     except Exception as e:
         return {"confirmed": 0, "missing": [], "error": f"{type(e).__name__}: {str(e)[:100]}"}
 
+def precheck_push_equipment(records):
+    """上傳前比對（v3.7）：先向雲端查目前的設備與照片數，再依上傳規則推算「上傳後」雲端會有幾台、幾張照片。
+    回傳 (結果, 錯誤)；錯誤不是 None 代表雲端查不到（連線異常），此時不應上傳。
+    推算規則與 push_equipment_to_supabase 相同：畫面有照片、或雲端同編號已有照片路徑，上傳後都算有照片
+    （畫面缺照片時會保留雲端路徑）；雲端有、畫面上沒有這個編號的設備，上傳後會連同照片一起消失。"""
+    sb = get_supabase_client()
+    if not sb:
+        return None, "尚未設定 Supabase 連線資訊（SUPABASE_URL／SUPABASE_SERVICE_KEY）"
+    try:
+        old = sb.table("equipment").select(
+            "equipment_code,equipment_name,appearance_photo_path,nameplate_photo_path,nameplate_photo_path2").execute().data or []
+    except Exception as e:
+        return None, f"{type(e).__name__}：{str(e)[:120]}"
+    cols = (("外觀照片", "appearance_photo_path"), ("銘牌照片", "nameplate_photo_path"), ("銘牌照片2", "nameplate_photo_path2"))
+    old_by_code = {}
+    for o in old:
+        old_by_code.setdefault(o.get("equipment_code"), o)
+    cloud = {"設備": len(old), **{f: sum(1 for o in old if o.get(c)) for f, c in cols}}
+    after = {"設備": len(records), **{f: 0 for f, _ in cols}}
+    loaded = {f: sum(1 for r in records if r.get(f)) for f, _ in cols}      # 目前畫面實際載入的照片
+    screen_codes = set()
+    for i, rec in enumerate(records):
+        code = str(rec.get("設備編號") or f"NOID_{i}").strip() or f"NOID_{i}"
+        screen_codes.add(code)
+        o = old_by_code.get(code) or {}
+        for f, c in cols:
+            if rec.get(f) or o.get(c):
+                after[f] += 1
+    gone = []      # 雲端有、上傳後會消失的設備：(編號, 名稱, [有的照片])
+    for o in old:
+        if o.get("equipment_code") not in screen_codes:
+            gone.append((o.get("equipment_code"), " ".join(str(o.get("equipment_name") or "").split()),
+                         [f for f, c in cols if o.get(c)]))
+    drops = {k: cloud[k] - after[k] for k in cloud if after[k] < cloud[k]}
+    return {"cloud": cloud, "after": after, "loaded": loaded, "drops": drops, "gone": gone}, None
+
 def push_equipment_to_supabase(records, force=False, progress=None):
     """把目前的設備清單（含照片）整批上傳到 Supabase，回傳 (成功與否, 訊息)。
     - 只上傳有變動的照片：上傳前先取得 Storage 的檔案清單（含檔案大小與 ETag＝內容 MD5），
@@ -2436,12 +2472,48 @@ def _banner_html(t):
 
 st.markdown(_banner_html(_hdr_texts()), unsafe_allow_html=True)
 
+# 啟動時雲端連不上（v3.7）：所有人都看得到的紅框＋「重新連線雲端」按鈕，不再只對管理員顯示文字提醒。
+# 畫面暫時顯示內建資料供瀏覽；重試成功就換成雲端資料，失敗就留在原狀並顯示原因。
+# - 沒登入的人按：只更新自己的畫面，不寫伺服器共用存檔（避免蓋掉管理員還沒上傳的編輯）、不記操作日誌（日誌一律記成「管理員」）
+# - 冷卻時間：每次重試後 60 秒內不能再按，避免連按一直下載全部照片、耗用 Supabase 流量
+if _cr_msg := st.session_state.pop("cloud_retry_flash", None):
+    st.success(_cr_msg)
+if st.session_state.get("cloud_offline"):
+    with st.container(border=True):
+        st.error("⚠️ **雲端連線失敗**：目前畫面是程式內建的舊資料，**不含雲端的照片與最近的修改**。"
+                 "請先不要編輯，也不要上傳到 Supabase。按下方按鈕重新連線雲端。")
+        import time as _time
+        _RETRY_COOLDOWN_S = 60
+        _wait = int(_RETRY_COOLDOWN_S - (_time.time() - st.session_state.get("cloud_retry_at", 0)))
+        _rc1, _rc2 = st.columns([1, 3], vertical_alignment="center")
+        if _rc1.button("🔄 重新連線雲端" if _wait <= 0 else f"⏳ 請 {_wait} 秒後再試", type="primary",
+                       use_container_width=True, key="cloud_retry", disabled=_wait > 0):
+            st.session_state["cloud_retry_at"] = _time.time()
+            with st.spinner("重新連線雲端並下載設備資料（含照片）…"):
+                _rd, _re = pull_equipment_from_supabase()
+            if _rd:
+                st.session_state["db"] = _rd
+                st.session_state["data_source"] = "cloud"
+                st.session_state["synced_sigs"] = _sync_sigs(_rd)
+                st.session_state.pop("cloud_offline", None)
+                st.session_state.pop("cloud_retry_err", None)
+                if st.session_state.get("logged_in"):          # 只有管理員才寫入共用存檔與操作日誌
+                    save_json(_rd)
+                    log_activity("重新連線雲端", f"已從雲端載入 {len(_rd)} 台設備")
+                _miss = st.session_state.get("cloud_photo_missing")
+                st.session_state["cloud_retry_flash"] = (f"✅ 已重新連上雲端，載入 {len(_rd)} 台設備。"
+                                                         + (f"（有 {_miss} 張照片沒能下載，可再按「從 Storage 依檔名補回照片」）" if _miss else ""))
+                st.rerun()
+            else:
+                st.session_state["cloud_retry_err"] = f"{datetime.now().strftime('%H:%M:%S')} 重試失敗：{_re or '雲端沒有資料'}"
+                st.rerun()                                         # 重畫一次，按鈕才會顯示冷卻倒數
+        _rc2.caption((st.session_state.get("cloud_retry_err") or f"啟動時的錯誤：{st.session_state['cloud_offline']}")
+                     + ("。為避免重複下載全部照片，每次重試後要等 60 秒才能再按" if _wait > 0 else "")
+                     + "。也可以稍後關掉分頁重新開啟，或在 Streamlit 按 Reboot app。")
+
 if st.session_state.get("logged_in"):
     if st.session_state.get("cloud_offline"):
-        st.warning("⚠️ **雲端連不上**（逾時、Supabase 暫停或網路問題）：目前顯示的是內建資料，**不含你上傳到雲端的照片與修改**。"
-                   "請先不要編輯，也不要上傳到 Supabase（會把雲端覆蓋成舊資料）。"
-                   "等 Supabase 恢復後，到「從Excel重新載入」頁按「從 Supabase 下載設備資料」，或在 Streamlit 按 Reboot app。\n\n"
-                   f"錯誤訊息：{st.session_state['cloud_offline']}")
+        pass   # 已在上方紅框提醒（所有人都看得到）
     elif st.session_state.get("cloud_photo_missing"):
         st.info(f"ℹ️ 有 {st.session_state['cloud_photo_missing']} 張照片沒能從雲端下載（網路逾時或雲端檔案不存在）。"
                 "可到「從Excel重新載入」頁按「從 Storage 依檔名補回照片」。")
@@ -4669,8 +4741,8 @@ elif "Excel" in menu:
                 if _offline:
                     st.warning("目前畫面是「雲端連不上」時載入的內建資料，上傳會把雲端覆蓋成這份舊資料。")
                     _ok_push = st.checkbox("我確認目前畫面的資料是最新的，仍要上傳", key="sb_push_force")
-                if st.button("⬆️ 上傳設備資料到 Supabase", use_container_width=True, key="sb_push_equip",
-                             disabled=not _ok_push):
+                def _do_push(pre=None):
+                    """實際上傳；pre 是上傳前比對結果，用來在成功訊息前加一行比對摘要"""
                     _pb = st.progress(0.0, text="準備上傳…")
                     def _push_cb(stage, done, total):
                         # 階段只有一步（total 為 1）時只顯示階段名稱；上傳照片時顯示「已處理 / 總數」
@@ -4687,9 +4759,64 @@ elif "Excel" in menu:
                         st.session_state["synced_sigs"] = _sync_sigs(st.session_state["db"])
                         _draw_sidebar_status()
                         st.session_state.pop("cloud_offline", None)
+                        if pre:
+                            _c, _a = pre["cloud"], pre["after"]
+                            _pc = sum(_c[k] for k in _c if k != "設備"); _pa = sum(_a[k] for k in _a if k != "設備")
+                            st.caption(f"上傳前比對：設備 {_c['設備']} → {_a['設備']} 台；照片 {_pc} → {_pa} 張"
+                                       + ("（數量減少，已由您確認）" if pre["drops"] else "（沒有減少）"))
                         (st.warning if "⚠️" in msg else st.success)(f"{'⚠️' if '⚠️' in msg else '✅'} {msg}" if "⚠️" not in msg else msg)
                     else:
                         st.error(f"❌ {msg}")
+
+                # 上傳前比對（v3.7）：照片或設備數「上傳後會比雲端少」時先攔下，勾選確認才能上傳；
+                # 沒有減少就直接上傳；雲端查不到（連線異常）就不上傳。
+                _db_sig = hashlib.md5(repr(sorted(_sync_sigs(st.session_state["db"]).items())).encode()).hexdigest()
+                _pre = st.session_state.get("push_pre")
+                if _pre and _pre.get("sig") != _db_sig:                 # 比對後資料又改過 → 比對結果作廢
+                    st.session_state.pop("push_pre", None); _pre = None
+                if st.button("⬆️ 上傳設備資料到 Supabase", use_container_width=True, key="sb_push_equip",
+                             disabled=not _ok_push):
+                    st.session_state.pop("push_pre", None); _pre = None
+                    with st.spinner("上傳前比對雲端的設備與照片數…"):
+                        _res, _perr = precheck_push_equipment(st.session_state["db"])
+                    if _perr:
+                        st.error(f"❌ 雲端連線異常，無法比對照片數，這次先不上傳，請稍後再試。（{_perr}）")
+                    elif _res["drops"]:
+                        st.session_state["push_pre"] = dict(_res, sig=_db_sig)
+                        st.rerun()
+                    else:
+                        _do_push(_res)
+                if _pre:
+                    _c, _a, _l = _pre["cloud"], _pre["after"], _pre["loaded"]
+                    _rows = []
+                    for k in ("設備", "外觀照片", "銘牌照片", "銘牌照片2"):
+                        _d = _a[k] - _c[k]
+                        _rows.append({"項目": k, "雲端現況": str(_c[k]), "上傳後": str(_a[k]),
+                                      "差異": f"{_d:+d}" if _d else "0",
+                                      "目前畫面已載入": "—" if k == "設備" else str(_l[k])})
+                    _lost_ph = sum(v for k, v in _pre["drops"].items() if k != "設備")
+                    _less = "、".join(x for x in ((f"{_pre['drops']['設備']} 台設備" if "設備" in _pre["drops"] else ""),
+                                                   (f"{_lost_ph} 張照片" if _lost_ph else "")) if x)
+                    st.error(f"⛔ 已暫停上傳：上傳後雲端會比現在少 {_less}"
+                             + "。可能是連線異常時資料沒下載完整，或目前畫面是內建／舊資料；"
+                               "建議先按「⬇️ 從 Supabase 下載設備資料」或「從 Storage 依檔名補回照片」。")
+                    st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
+                    if _pre["gone"]:
+                        with st.expander(f"展開看會消失的 {len(_pre['gone'])} 台設備（雲端有、目前畫面沒有）"):
+                            st.dataframe(pd.DataFrame([{"設備編號": g[0], "設備名稱": g[1],
+                                                        "雲端照片": "、".join(g[2]) or "—"} for g in _pre["gone"]]),
+                                         hide_index=True, use_container_width=True)
+                    _pre_ok = st.checkbox("我確認減少的設備或照片是刻意刪除的", key="push_pre_ok")
+                    _pc1, _pc2 = st.columns([2, 1])
+                    if _pc1.button("仍要上傳", type="primary", use_container_width=True, key="push_pre_go",
+                                   disabled=not _pre_ok):
+                        st.session_state.pop("push_pre", None)
+                        st.session_state.pop("push_pre_ok", None)
+                        _do_push(_pre)
+                    if _pc2.button("取消", use_container_width=True, key="push_pre_cancel"):
+                        st.session_state.pop("push_pre", None)
+                        st.session_state.pop("push_pre_ok", None)
+                        st.rerun()
                 # 平常只傳有變動的照片；懷疑雲端照片有問題（或想全部重新確認一遍）時勾這個，全部重傳
                 st.checkbox("強制重傳所有照片（平常不用勾；懷疑雲端照片有問題時才勾）", key="sb_push_force_photos")
             with c2:
