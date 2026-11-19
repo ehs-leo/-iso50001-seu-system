@@ -852,6 +852,295 @@ def read_enb_equipment_from_excel():
     return equipment_list, None
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 3-3. 能源基線追蹤（EnB）多年度（v3.8）：上傳整份「各項能源基線追蹤表」Excel 解析
+#      - 「YYYY年…能源基線-全廠」分頁 → 該年度「單位產量耗能」「整廠用電量」
+#      - 「YYYY年…重大能源使用設備」分頁 → 該年度設備子表（大型攪拌機、研磨機…）
+#      - 比最新績效年度更新的年份（例如 2026）：由「各年度整廠用電」「各年度整廠產量」原始數據計算，沒有基線
+#      - 其餘分頁（各電號用電、各單位產量、各機台數據、隱藏分頁…）屬限制資料，只有管理員能看
+#      注意：這份 Excel 的圖表 XML 讓 openpyxl 完整模式無法開啟，只能用 pandas（唯讀）讀值；
+#      原始檔一律原封不動保存與下載，絕不用程式重新產生。
+# ─────────────────────────────────────────────────────────────────────────────
+ENB_ITEMS = {                      # 頁面代碼 → (選單名稱, 資料位置)
+    "unit":    "單位產量耗能",
+    "plant":   "整廠用電量",
+    "mixer":   "大型攪拌機系統單位產量耗能",
+    "grinder": "研磨機系統能源效率",
+}
+ENB_EQ_KEYWORD = {"mixer": "攪拌機", "grinder": "研磨機"}
+
+def _enb_year_of(name):
+    m = re.match(r"\s*(\d{4})\s*年", str(name or ""))
+    return int(m.group(1)) if m else None
+
+def _enb_read_diff_by_label(df, year=None):
+    """差異分析附表依「月份」欄的文字對應月份（N月，或 YYYY年N月 且年份相符），
+    避免 Excel 少填一列（例如 2024 年缺 9 月那列）時整排錯位；回傳 (reason[12], action[12]) 或 (None, None)"""
+    pos = _find_cell(df, "原因")
+    if not pos:
+        return None, None
+    r0, c_reason = pos
+    c_month = c_action = None
+    for c in range(df.shape[1]):
+        v = df.iloc[r0, c]
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            continue
+        if c_month is None and "月份" in str(v):
+            c_month = c
+        if c_action is None and "預防" in str(v):
+            c_action = c
+    if c_month is None or c_action is None:
+        return _read_diff_table(df)
+    reasons, actions = [""] * 12, [""] * 12
+    for rr in range(r0 + 1, min(r0 + 20, len(df))):
+        mv = df.iloc[rr, c_month]
+        if mv is None or (isinstance(mv, float) and pd.isna(mv)):
+            continue
+        m = re.match(r"^\s*(?:(\d{4})\s*年)?\s*(\d{1,2})\s*月\s*$", str(mv))
+        if not m:
+            continue
+        if m.group(1) and year and int(m.group(1)) != int(year):
+            continue
+        k = int(m.group(2)) - 1
+        if 0 <= k < 12:
+            rv, av = df.iloc[rr, c_reason], df.iloc[rr, c_action]
+            reasons[k] = str(rv).strip() if (rv is not None and pd.notna(rv)) else ""
+            actions[k] = str(av).strip() if (av is not None and pd.notna(av)) else ""
+    return reasons, actions
+
+def _enb_split_unit_plant(df):
+    """「全廠」分頁裡單位產量耗能與整廠用電量疊在一起：以子表標題（能源績效指標-…整廠用電量）切開；
+    找不到標題時退回舊做法（第一個含「整廠用電量」的儲存格）"""
+    blocks = _find_block_title_rows(df)
+    for r, title, _n in blocks:
+        if "整廠用電量" in title:
+            return r
+    pos = _find_cell(df, "整廠用電量")
+    return pos[0] if pos else None
+
+def _enb_parse_unit_df(df, year=None):
+    split = _enb_split_unit_plant(df)
+    unit_df = df.iloc[:split].reset_index(drop=True) if split else df
+    kwh_rows  = _find_label_rows(unit_df, "用電量", exclude=["指標", "績效"])
+    prod_rows = _find_label_rows(unit_df, "產量", exclude=["指標", "績效"])
+    std_rows  = _find_label_rows(unit_df, "標準基線", exclude=["指標", "績效"])
+    adj_rows  = _find_label_rows(unit_df, "調整時機", exclude=["指標", "績效"])
+    note_rows = _find_label_rows(unit_df, "備註", exclude=["指標", "績效"])
+    if not (kwh_rows and prod_rows and std_rows and adj_rows):
+        return None, "找不到「每月單位產量耗能」表的必要資料列（用電量／產量／標準基線／調整時機）"
+    data = {
+        "kwh":        _read_month_row(unit_df, kwh_rows[0]),
+        "production": _read_month_row(unit_df, prod_rows[0]),
+        "std":        _read_month_row(unit_df, std_rows[0]),
+        "adj_upper":  _read_month_row(unit_df, adj_rows[0]),
+        "adj_lower":  _read_month_row(unit_df, adj_rows[0] + 1),
+        "note": ([str(v).strip() if (v is not None and pd.notna(v)) else ""
+                  for v in [unit_df.iloc[note_rows[0], 2 + i] if (2 + i) < unit_df.shape[1] else None for i in range(12)]]
+                 if note_rows else [""] * 12),
+    }
+    reasons, actions = _enb_read_diff_by_label(unit_df, year)
+    data["reason"] = reasons if reasons else [""] * 12
+    data["action"] = actions if actions else [""] * 12
+    return data, None
+
+def _enb_parse_plant_df(df, year=None):
+    split = _enb_split_unit_plant(df)
+    if split is None:
+        return None, "找不到「整廠用電量」子表標題"
+    plant_df = df.iloc[split:].reset_index(drop=True)
+    actual_rows = _find_label_rows(plant_df, "整廠電量", exclude=["標準基線", "調整", "指標", "績效"])
+    base_rows   = _find_label_rows(plant_df, "標準基線", exclude=["指標", "績效"])
+    adj_rows    = _find_label_rows(plant_df, "調整時機", exclude=["指標", "績效"])
+    if not (actual_rows and base_rows and adj_rows):
+        return None, "找不到「整廠用電量」表的必要資料列（整廠電量／標準基線／調整時機）"
+    data = {
+        "actual":        _read_month_row(plant_df, actual_rows[0]),
+        "baseline_prev": _read_month_row(plant_df, base_rows[0]),
+        "adj_upper":     _read_month_row(plant_df, adj_rows[0]),
+        "adj_lower":     _read_month_row(plant_df, adj_rows[0] + 1),
+    }
+    reasons, actions = _enb_read_diff_by_label(plant_df, year)
+    data["reason"] = reasons if reasons else [""] * 12
+    data["action"] = actions if actions else [""] * 12
+    return data, None
+
+def _enb_parse_equipment_df(df):
+    blocks = _find_block_title_rows(df)
+    out = []
+    for i, (row_idx, full_title, name) in enumerate(blocks):
+        end_row = blocks[i + 1][0] if i + 1 < len(blocks) else len(df)
+        block_df = df.iloc[row_idx:end_row].reset_index(drop=True)
+        month_rows = _find_label_rows(block_df, "月份")
+        if not month_rows:
+            continue
+        months = _extract_month_header(block_df, month_rows[0])
+        if not months:
+            continue
+        n = len(months)
+        numer_row, denom_row = month_rows[0] + 1, month_rows[0] + 2
+        lab = lambda r, d: (str(block_df.iloc[r, 1]).strip() if r < len(block_df) and pd.notna(block_df.iloc[r, 1]) else d)
+        std_rows = _find_label_rows(block_df, "標準基線")
+        adj_rows = _find_label_rows(block_df, "調整時機")
+        out.append({
+            "title": name, "numerator_label": lab(numer_row, "數值1"), "denominator_label": lab(denom_row, "數值2"),
+            "months": months,
+            "numerator": _read_values_by_count(block_df, numer_row, n),
+            "denominator": _read_values_by_count(block_df, denom_row, n),
+            "std": _read_values_by_count(block_df, std_rows[0], n) if std_rows else [None] * n,
+            "adj_upper": _read_values_by_count(block_df, adj_rows[0], n) if adj_rows else [None] * n,
+            "adj_lower": _read_values_by_count(block_df, adj_rows[0] + 1, n) if adj_rows else [None] * n,
+            "diff": {str(k): v for k, v in _read_equipment_diff_table(block_df).items()},
+        })
+    return out
+
+def _enb_month_vals(row, c0, n=12):
+    vals = []
+    for i in range(n):
+        v = row[c0 + i] if c0 + i < len(row) else None
+        f = _sf(v)
+        vals.append(f)
+    return vals
+
+def _enb_parse_raw_power(xls):
+    """「各年度整廠用電」：每個「YYYY年全廠用電量」區塊 → {年: {"plant": 全廠每月總和, "unit_kwh": 一二廠全廠實際用電（沒有就台電端用電）}}"""
+    sh = next((x for x in xls.sheet_names if "整廠用電" in x and "績效" not in x), None)
+    if not sh:
+        return {}
+    df = pd.read_excel(xls, sheet_name=sh, header=None)
+    out, year, grp, row12 = {}, None, None, {}
+    for i in range(len(df)):
+        row = list(df.iloc[i])
+        c0 = str(row[0]).strip() if pd.notna(row[0]) else ""
+        y = _enb_year_of(c0) if ("用電量" in c0) else None
+        if y:
+            year, grp, row12 = y, None, {}
+            out[year] = {"plant": None, "unit_kwh": None}
+            continue
+        if year is None:
+            continue
+        fac = str(row[1]).strip() if len(row) > 1 and pd.notna(row[1]) else ""
+        src = str(row[2]).strip() if len(row) > 2 and pd.notna(row[2]) else ""
+        if fac:
+            grp = fac
+        if "全廠每月總和" in c0 or "全廠每月總和" in fac:
+            out[year]["plant"] = _enb_month_vals(row, 3)
+            grp = None
+        elif grp == "一二廠" and src:
+            row12[src] = _enb_month_vals(row, 3)
+            out[year]["unit_kwh"] = row12.get("全廠實際用電") or row12.get("台電端用電")
+    return out
+
+def _enb_parse_raw_production(xls):
+    """「各年度整廠產量」：每個「YYYY年製造單位…」區塊 → {年: 各單位產量逐月加總}"""
+    sh = next((x for x in xls.sheet_names if "整廠產量" in x), None)
+    if not sh:
+        return {}
+    df = pd.read_excel(xls, sheet_name=sh, header=None)
+    out, year = {}, None
+    for i in range(len(df)):
+        row = list(df.iloc[i])
+        c0 = str(row[0]).strip() if pd.notna(row[0]) else ""
+        y = _enb_year_of(c0)
+        if y and ("製造" in c0 or "產量" in c0):
+            year = y; out[year] = [None] * 12
+            continue
+        if year is None or not c0 or c0 in ("噸",) or not re.match(r"^[A-Za-z0-9]+$", c0):
+            continue
+        vals = _enb_month_vals(row, 2)
+        out[year] = [((a or 0) + (b or 0)) if (a is not None or b is not None) else None for a, b in zip(out[year], vals)]
+    return out
+
+def parse_enb_workbook(file_bytes):
+    """解析整份 Excel。回傳 (結果, 錯誤)。結果：
+    {"years": {"2025": {"monthly_unit":…, "plant":…, "equipment":[…], "computed": {"monthly_unit":bool,"plant":bool}}},
+     "perf_sheets": [...], "restricted_sheets": [...], "hidden_sheets": [...], "warnings": [...]}"""
+    try:
+        xls = pd.ExcelFile(BytesIO(file_bytes))
+    except Exception as e:
+        return None, f"無法讀取這份 Excel：{type(e).__name__}：{e}"
+    years, perf, warns = {}, [], []
+    for sh in xls.sheet_names:
+        y = _enb_year_of(sh)
+        if not y:
+            continue
+        if "全廠" in sh and "能源基線" in sh:
+            df = pd.read_excel(xls, sheet_name=sh, header=None)
+            u, ue = _enb_parse_unit_df(df, y)
+            pl, pe = _enb_parse_plant_df(df, y)
+            yd = years.setdefault(str(y), {})
+            yd.setdefault("_sheet", {}).update({"unit": sh, "plant": sh})
+            if u: yd["monthly_unit"] = u
+            else: warns.append(f"「{sh}」：{ue}")
+            if pl: yd["plant"] = pl
+            else: warns.append(f"「{sh}」：{pe}")
+            perf.append(sh)
+        elif "重大能源使用設備" in sh:
+            df = pd.read_excel(xls, sheet_name=sh, header=None)
+            eq = _enb_parse_equipment_df(df)
+            if eq:
+                years.setdefault(str(y), {})["equipment"] = eq
+                years[str(y)].setdefault("_sheet", {}).update({"mixer": sh, "grinder": sh})
+                perf.append(sh)
+            else:
+                warns.append(f"「{sh}」：找不到可解析的設備子表")
+    # 比最新績效年度更新的年份：由原始數據計算（沒有基線）
+    perf_years = [int(k) for k, v in years.items() if v.get("monthly_unit") or v.get("plant")]
+    last = max(perf_years) if perf_years else 0
+    power, prod = _enb_parse_raw_power(xls), _enb_parse_raw_production(xls)
+    for y in sorted(set(power) | set(prod)):
+        if y <= last:
+            continue
+        yd = years.setdefault(str(y), {})
+        comp = yd.setdefault("computed", {})
+        pw, pr = power.get(y, {}), prod.get(y)
+        if pw.get("unit_kwh") and pr:
+            prod12 = [v if v else None for v in pr]
+            yd["monthly_unit"] = {"kwh": pw["unit_kwh"], "production": prod12,
+                                  "std": [None] * 12, "adj_upper": [None] * 12, "adj_lower": [None] * 12,
+                                  "note": [""] * 12, "reason": [""] * 12, "action": [""] * 12}
+            comp["monthly_unit"] = True
+        if pw.get("plant"):
+            yd["plant"] = {"actual": [v if v else None for v in pw["plant"]], "baseline_prev": [None] * 12,
+                           "adj_upper": [None] * 12, "adj_lower": [None] * 12,
+                           "reason": [""] * 12, "action": [""] * 12}
+            comp["plant"] = True
+    try:
+        import openpyxl as _opx
+        _wb = _opx.load_workbook(BytesIO(file_bytes), read_only=True)
+        hidden = [ws.title for ws in _wb.worksheets if ws.sheet_state != "visible"]
+        _wb.close()
+    except Exception:
+        hidden = []
+    restricted = [x for x in xls.sheet_names if x not in perf]
+    return {"years": years, "perf_sheets": perf, "restricted_sheets": restricted,
+            "hidden_sheets": hidden, "warnings": warns}, None
+
+def _enb_item_data(yd, item):
+    """從某年度資料取出頁面要的那一份：unit／plant 回傳 dict，mixer／grinder 回傳設備子表 dict"""
+    if not yd:
+        return None
+    if item == "unit":
+        return yd.get("monthly_unit")
+    if item == "plant":
+        return yd.get("plant")
+    kw = ENB_EQ_KEYWORD[item]
+    return next((e for e in (yd.get("equipment") or []) if kw in str(e.get("title", ""))), None)
+
+def enb_years_for(item):
+    yrs = st.session_state.get("enb", {}).get("years", {})
+    return sorted([y for y, yd in yrs.items() if _enb_item_data(yd, item)], reverse=True)
+
+def _enb_migrate(data):
+    """舊版單一年度存檔（monthly_unit／plant／equipment 在最上層）→ 多年度格式。
+    舊資料是當時最新的 2025 年績效分頁同步來的，所以放在 2025 年（上傳新的 Excel 後會被正式資料取代）。"""
+    if not data:
+        return None
+    if "years" in data:
+        data.setdefault("files", [])
+        return data
+    yd = {k: data[k] for k in ("monthly_unit", "plant", "equipment") if data.get(k)}
+    return {"v": 2, "years": {"2025": yd} if yd else {}, "files": [], "migrated_from_legacy": True}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 3-2. Supabase 雲端同步（取代/輔助本地 JSON 檔案，解決 Streamlit Cloud
 #      重新部署後資料被清空的問題）
 #      設計原則：
@@ -1717,9 +2006,14 @@ def load_enb():
     return None
 
 def save_enb(data):
+    """v3.8：多年度能源基線資料存本地 enb_data.json，並整份同步到雲端 app_meta（key＝enb_data）。
+    舊版的 enb_monthly_unit／enb_plant／enb_equipment 資料表只有單一年度，不再寫入（保留供舊資料讀取）。"""
     with open(ENB_JSON, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, default=str)
-    # 跟 save_layout()／log_activity() 一樣，有設定 Supabase 就順便同步一份。
+    if "years" in data:
+        _enb_push_cloud(data)
+        return
+    # （以下為舊版單一年度格式的同步，只在資料尚未轉成多年度格式時使用）
     # 這裡原本漏掉這一步：使用者在網頁表單手動編輯 EnB 資料按「儲存」後，
     # 只會存進本機的 enb_data.json，並不會自動同步到 Supabase；
     # 如果之後重新部署，這些手動編輯的內容就會遺失（要等下次手動點同步按鈕才找得回來，
@@ -1734,6 +2028,172 @@ def save_enb(data):
             push_enb_equipment_to_supabase(data["equipment"])
     except Exception:
         pass
+
+def _enb_push_cloud(data):
+    sb = get_supabase_client()
+    if not sb:
+        return False, "尚未設定 Supabase"
+    try:
+        sb.table("app_meta").upsert({"key": "enb_data", "value": json.dumps(data, ensure_ascii=False, default=str),
+                                     "updated_at": datetime.now().isoformat()}, on_conflict="key").execute()
+        return True, None
+    except Exception as e:
+        return False, f"{type(e).__name__}：{str(e)[:150]}"
+
+def _enb_pull_cloud():
+    sb = get_supabase_client()
+    if not sb:
+        return None
+    try:
+        rows = sb.table("app_meta").select("value").eq("key", "enb_data").execute().data or []
+        return json.loads(rows[0]["value"]) if rows and rows[0].get("value") else None
+    except Exception:
+        return None
+
+# ── 原始 Excel 保存（v3.8）：原封不動存到 Supabase Storage 私有空間 enb-files，下載時送出同一份檔案並比對 MD5 ──
+ENB_BUCKET = "enb-files"
+ENB_LOCAL_DIR = "enb_files"
+
+def enb_store_file(file_bytes, orig_name):
+    """保存原始檔，回傳 (版本資訊 dict, 錯誤)。Storage 檔名只用英數字（Supabase 不接受中文檔名），原始檔名記在版本資訊裡。"""
+    md5 = hashlib.md5(file_bytes).hexdigest()
+    key = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{md5[:8]}.xlsx"
+    meta = {"key": key, "name": orig_name, "size": len(file_bytes), "md5": md5,
+            "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "where": "local"}
+    try:
+        os.makedirs(ENB_LOCAL_DIR, exist_ok=True)
+        with open(os.path.join(ENB_LOCAL_DIR, key), "wb") as f:
+            f.write(file_bytes)
+    except Exception:
+        pass
+    sb = get_supabase_client()
+    if not sb:
+        return meta, None          # 沒設定 Supabase（本機執行）：只存本地
+    try:
+        try:
+            sb.storage.create_bucket(ENB_BUCKET, options={"public": False})
+        except Exception:
+            pass                   # 已存在
+        sb.storage.from_(ENB_BUCKET).upload(
+            key, file_bytes,
+            {"content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "upsert": "true"})
+        meta["where"] = "cloud"
+        return meta, None
+    except Exception as e:
+        return None, f"原始檔存到雲端失敗：{type(e).__name__}：{str(e)[:150]}"
+
+def enb_fetch_file(meta):
+    """取回原始檔，回傳 (bytes, 錯誤)；一律比對 MD5，確認與上傳時完全相同"""
+    if not meta:
+        return None, "沒有原始檔紀錄"
+    raw = None
+    lp = os.path.join(ENB_LOCAL_DIR, meta["key"])
+    if os.path.exists(lp):
+        with open(lp, "rb") as f:
+            raw = f.read()
+        if hashlib.md5(raw).hexdigest() != meta.get("md5"):
+            raw = None
+    if raw is None:
+        sb = get_supabase_client()
+        if not sb:
+            return None, "本機找不到原始檔，且尚未設定 Supabase"
+        try:
+            raw = sb.storage.from_(ENB_BUCKET).download(meta["key"])
+        except Exception as e:
+            return None, f"從雲端取回原始檔失敗：{type(e).__name__}：{str(e)[:150]}"
+    if hashlib.md5(raw).hexdigest() != meta.get("md5"):
+        return None, "取回的檔案與上傳時的檢查碼不同，為避免提供錯誤檔案，已停止下載"
+    return raw, None
+
+ENB_RAW_SHEET_KEYS = {"unit": ["整廠用電", "整廠產量"], "plant": ["整廠用電"],
+                      "mixer": ["攪拌機數據"], "grinder": ["研磨機數據"]}
+_ENB_YD_KEY = {"unit": "monthly_unit", "plant": "plant"}
+
+def _enb_page_header(item):
+    """能源基線頁面上方：年份選單與狀態標示。回傳 (年份字串, 該年度資料 dict, 該頁資料) ；沒有資料回傳 (None, None, None)"""
+    yrs = enb_years_for(item)
+    if not yrs:
+        st.info("尚未上傳這個項目的資料。管理員可在「🔒 能源基線資料管理」上傳各項能源基線追蹤表 Excel。")
+        return None, None, None
+    c1, c2 = st.columns([1, 3], vertical_alignment="bottom")
+    y = c1.selectbox("年度", yrs, key=f"enb_year_{item}", format_func=lambda v: f"{v} 年")
+    yd = st.session_state["enb"]["years"][y]
+    src = (yd.get("sources") or {}).get(item)
+    notes = []
+    if (yd.get("computed") or {}).get(_ENB_YD_KEY.get(item, "")):
+        notes.append("ℹ️ 本年度由原始數據（各年度整廠用電、各年度整廠產量）計算，尚未設定能源基線")
+    ed = (yd.get("edited") or {}).get(_ENB_YD_KEY.get(item, item))
+    if ed:
+        notes.append(f"⚠️ 本年度有網頁修改（{ed}），與原始 Excel 不同")
+    if src:
+        c2.caption(f"資料來源：{src}")
+    for n in notes:
+        st.caption(n)
+    return y, yd, _enb_item_data(yd, item)
+
+def _enb_mark_edited(y, key):
+    yd = st.session_state["enb"]["years"][y]
+    yd.setdefault("edited", {})[key] = datetime.now().strftime("%Y/%m/%d %H:%M")
+
+def _enb_get_raw(meta):
+    """取回原始檔 bytes（同一份檔案在這次連線中只下載一次）"""
+    cache = st.session_state.get("enb_raw")
+    if cache and cache.get("key") == meta["key"]:
+        return cache["bytes"], None
+    raw, err = enb_fetch_file(meta)
+    if raw is not None:
+        st.session_state["enb_raw"] = {"key": meta["key"], "bytes": raw}
+    return raw, err
+
+def _enb_show_raw_sheets(raw, keys):
+    try:
+        xls = pd.ExcelFile(BytesIO(raw))
+    except Exception as e:
+        st.error(f"❌ 無法讀取原始檔：{e}")
+        return
+    names = [n for n in xls.sheet_names if any(k in n for k in keys)] if keys else xls.sheet_names
+    if not names:
+        st.info("原始檔裡沒有相關的工作表。")
+        return
+    for n in names:
+        st.markdown(f"**📄 {n}**")
+        df = pd.read_excel(xls, sheet_name=n, header=None).dropna(how="all").dropna(axis=1, how="all")
+        st.dataframe(df.astype(str).replace({"nan": "", "None": ""}), hide_index=True, use_container_width=True)
+
+def _enb_download_button(meta, key_sfx):
+    """管理員下載原始 Excel（兩段式：先取回並比對 MD5，再顯示下載按鈕）"""
+    cache = st.session_state.get("enb_raw")
+    if cache and cache.get("key") == meta["key"]:
+        st.download_button("⬇️ 下載原始 Excel（與上傳檔完全相同）", cache["bytes"], file_name=meta["name"],
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           use_container_width=True, key=f"enb_dl_{key_sfx}")
+    elif st.button("📥 準備下載原始 Excel", use_container_width=True, key=f"enb_prep_{key_sfx}"):
+        raw, err = _enb_get_raw(meta)
+        if err:
+            st.error(f"❌ {err}")
+        else:
+            st.rerun()
+
+def _enb_admin_box(item):
+    """各能源基線頁面最下方的管理員專區：原始 Excel 下載＋該頁相關的限制原始數據"""
+    if not st.session_state.get("logged_in"):
+        return
+    st.divider()
+    with st.expander("🔒 管理員專區：原始 Excel 與相關原始數據", expanded=False):
+        files = st.session_state["enb"].get("files") or []
+        if not files:
+            st.info("尚未上傳原始 Excel。請到「🔒 能源基線資料管理」上傳。")
+            return
+        meta = files[-1]
+        st.caption(f"最新原始檔：{meta['name']}（上傳於 {meta['uploaded_at']}，{meta['size'] / 1024:,.0f} KB，"
+                   f"MD5 {meta['md5'][:12]}…）")
+        _enb_download_button(meta, item)
+        if st.toggle("顯示相關原始數據（限制資料）", key=f"enb_rawshow_{item}"):
+            raw, err = _enb_get_raw(meta)
+            if err:
+                st.error(f"❌ {err}")
+            else:
+                _enb_show_raw_sheets(raw, ENB_RAW_SHEET_KEYS.get(item))
 
 def get_default_enb():
     """兩張能源基線追蹤表的預設示範資料（可於修改模式覆蓋）"""
@@ -2155,22 +2615,26 @@ if "db" not in st.session_state:
             st.session_state["synced_sigs"] = None
 
 if "enb" not in st.session_state:
-    saved_enb = load_enb()
-    if saved_enb:
-        st.session_state["enb"] = saved_enb
-    else:
-        # 同樣先試著從 Supabase 抓回上次的資料
-        default_enb = get_default_enb()
-        mu, _ = pull_enb_monthly_unit_from_supabase()
-        pl, _ = pull_enb_plant_from_supabase()
-        eq, _ = pull_enb_equipment_from_supabase()
-        default_enb["monthly_unit"] = mu if mu else default_enb["monthly_unit"]
-        default_enb["plant"] = pl if pl else default_enb["plant"]
-        default_enb["equipment"] = eq if eq else default_enb["equipment"]
-        st.session_state["enb"] = default_enb
-        if mu or pl or eq:
-            save_enb(default_enb)
-st.session_state["enb"].setdefault("equipment", [])   # 舊存檔相容：沒有這個欄位就補空清單
+    # v3.8：多年度格式。順序：本地存檔 → 雲端 app_meta（enb_data）→ 舊版單一年度資料表 → 預設示範資料；
+    # 舊版單一年度資料一律轉成多年度格式（放在 2025 年，上傳新的 Excel 後會被正式資料取代）
+    _enb0 = _enb_migrate(load_enb())
+    if _enb0 is None:
+        _enb0 = _enb_migrate(_enb_pull_cloud())
+        if _enb0 is None:
+            default_enb = get_default_enb()
+            mu, _ = pull_enb_monthly_unit_from_supabase()
+            pl, _ = pull_enb_plant_from_supabase()
+            eq, _ = pull_enb_equipment_from_supabase()
+            default_enb["monthly_unit"] = mu if mu else default_enb["monthly_unit"]
+            default_enb["plant"] = pl if pl else default_enb["plant"]
+            default_enb["equipment"] = eq if eq else default_enb["equipment"]
+            _enb0 = _enb_migrate(default_enb)
+        try:
+            with open(ENB_JSON, "w", encoding="utf-8") as f:
+                json.dump(_enb0, f, ensure_ascii=False, default=str)
+        except Exception:
+            pass
+    st.session_state["enb"] = _enb0
 _SB_FAST_MODE = False  # 啟動載入結束，之後的 Supabase 操作回到一般連線
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2492,20 +2956,40 @@ with st.sidebar:
     st.divider()
 
     st.markdown("**📋 功能選單**")
-    base_menu = [
-        "全廠能耗儀表板",
-        "設備盤查與照片管理",
-        "評分標準說明",
-        "能源換算與排放數據",
-        "每日負載分析",
-        "能源基線追蹤-單位產量耗能",
-        "能源基線追蹤-整廠用電量",
-        "能源基線追蹤-重大設備",
-    ]
+    # v3.8：選單分三組（一般功能／📈 能源基線追蹤／🔒 管理員），各是一個 radio；
+    # 點了某一組時把另外兩組清成未選，目前選取的頁面記在 menu_sel。
+    _MENU_MAIN = ["全廠能耗儀表板", "設備盤查與照片管理", "評分標準說明", "能源換算與排放數據", "每日負載分析"]
+    _MENU_ENB = [f"能源基線追蹤-{ENB_ITEMS[k]}" for k in ("unit", "plant", "mixer", "grinder")]
+    _MENU_ADMIN = ["從Excel重新載入", "版面格式設定", "能源基線資料管理"]
+    _groups = {"menu_main": _MENU_MAIN, "menu_enb": _MENU_ENB}
     if st.session_state["logged_in"]:
-        base_menu.append("從Excel重新載入")
-        base_menu.append("版面格式設定")
-    menu = st.radio("", base_menu, label_visibility="collapsed")
+        _groups["menu_admin"] = _MENU_ADMIN
+    _sel = st.session_state.get("menu_sel", _MENU_MAIN[0])
+    if not any(_sel in opts for opts in _groups.values()):      # 例如登出後原本停在管理員頁
+        _sel = _MENU_MAIN[0]
+    st.session_state["menu_sel"] = _sel
+
+    def _menu_pick(gk):
+        v = st.session_state.get(gk)
+        if v:
+            st.session_state["menu_sel"] = v
+            for other in ("menu_main", "menu_enb", "menu_admin"):
+                if other != gk:
+                    st.session_state[other] = None
+
+    for _gk, _opts in _groups.items():
+        if _gk == "menu_enb":
+            st.markdown("<div style='font-size:0.8em;color:#93c5fd;font-weight:600;margin:6px 0 -6px'>📈 能源基線追蹤</div>",
+                        unsafe_allow_html=True)
+        elif _gk == "menu_admin":
+            st.markdown("<div style='font-size:0.8em;color:#93c5fd;font-weight:600;margin:6px 0 -6px'>🔒 管理員</div>",
+                        unsafe_allow_html=True)
+        _lbl = (lambda x: x.replace("能源基線追蹤-", "")) if _gk == "menu_enb" else (lambda x: x)
+        if st.session_state.get(_gk) not in _opts:            # 第一次建立或選項變動：依目前頁面設定初值
+            st.session_state[_gk] = _sel if _sel in _opts else None
+        st.radio(_gk, _opts, key=_gk, format_func=_lbl, label_visibility="collapsed",
+                 on_change=_menu_pick, args=(_gk,))
+    menu = st.session_state["menu_sel"]
 
     with st.container(key="energy_link_box"):
         st.link_button("🌡️ 永寬能源管理系統（廠內網路）", ENERGY_MGMT_URL, use_container_width=True,
@@ -4209,7 +4693,7 @@ elif "負載" in menu:
 # ─────────────────────────────────────────────────────────────────────────────
 # ── 頁面：能源基線追蹤－每月單位產量耗能
 # ─────────────────────────────────────────────────────────────────────────────
-elif "單位產量耗能" in menu:
+elif menu == "能源基線追蹤-單位產量耗能":
     st.subheader("⚡ 能源基線追蹤－每月單位產量耗能")
     st.caption("依 ISO 50001 能源基線（EnB）與能源績效指標（EnPI）追蹤生產能耗強度")
     st.markdown(f"""
@@ -4220,12 +4704,15 @@ elif "單位產量耗能" in menu:
 
     MONTHS = list(range(1, 13))
     MONTH_LABELS = [f"{m}月" for m in MONTHS]
-    enb_u = st.session_state["enb"]["monthly_unit"]
+    _ey, _eyd, enb_u = _enb_page_header("unit")          # v3.8：年份選單（2026 起由原始數據計算）
+    if enb_u is None:
+        _enb_admin_box("unit")
+        st.stop()
 
     # ── 修改模式：逐月填報表單 ──────────────────────────────
     if st.session_state["edit_mode"]:
         with st.expander("✏️ 編輯每月用電量／產量／基線設定", expanded=False):
-            with st.form("enb_unit_form"):
+            with st.form(f"enb_unit_form_{_ey}"):
                 cols = st.columns(4)
                 new_kwh, new_prod, new_std, new_up, new_low, new_note = [], [], [], [], [], []
                 for i, m in enumerate(MONTHS):
@@ -4233,27 +4720,27 @@ elif "單位產量耗能" in menu:
                         st.markdown(f"**{m} 月**")
                         new_kwh.append(st.number_input(
                             "用電量(kWh)", min_value=0.0,
-                            value=float(enb_u["kwh"][i] or 0), key=f"eu_kwh_{m}"))
+                            value=float(enb_u["kwh"][i] or 0), key=f"eu_kwh_{_ey}_{m}"))
                         new_prod.append(st.number_input(
                             "產量(噸)", min_value=0.0,
-                            value=float(enb_u["production"][i] or 0), key=f"eu_prod_{m}"))
+                            value=float(enb_u["production"][i] or 0), key=f"eu_prod_{_ey}_{m}"))
                         new_std.append(st.number_input(
                             "能源標準基線(kWh/噸)", min_value=0.0,
-                            value=float(enb_u["std"][i] or 0), key=f"eu_std_{m}"))
+                            value=float(enb_u["std"][i] or 0), key=f"eu_std_{_ey}_{m}"))
                         new_up.append(st.number_input(
                             "基線調整上限(kWh/噸)", min_value=0.0,
-                            value=float(enb_u["adj_upper"][i] or 0), key=f"eu_up_{m}"))
+                            value=float(enb_u["adj_upper"][i] or 0), key=f"eu_up_{_ey}_{m}"))
                         new_low.append(st.number_input(
                             "基線調整下限(kWh/噸)", min_value=0.0,
-                            value=float(enb_u["adj_lower"][i] or 0), key=f"eu_low_{m}"))
+                            value=float(enb_u["adj_lower"][i] or 0), key=f"eu_low_{_ey}_{m}"))
                         new_note.append(st.text_input(
-                            "備註", value=enb_u["note"][i], key=f"eu_note_{m}"))
+                            "備註", value=enb_u["note"][i], key=f"eu_note_{_ey}_{m}"))
                         st.divider()
                 if st.form_submit_button("💾 儲存單位產量耗能設定", use_container_width=True):
                     enb_u["kwh"], enb_u["production"] = new_kwh, new_prod
                     enb_u["std"], enb_u["adj_upper"], enb_u["adj_lower"] = new_std, new_up, new_low
                     enb_u["note"] = new_note
-                    st.session_state["enb"]["monthly_unit"] = enb_u
+                    _enb_mark_edited(_ey, "monthly_unit")
                     save_enb(st.session_state["enb"])
                     st.success("✅ 已儲存！")
                     st.rerun()
@@ -4290,7 +4777,7 @@ elif "單位產量耗能" in menu:
                                 mode="lines", line=dict(color="#ef4444", width=2)))
     fig_u.add_trace(go.Scatter(x=MONTH_LABELS, y=enb_u["adj_lower"], name="基線調整下限",
                                 mode="lines", line=dict(color="#ef4444", width=2)))
-    fig_u.update_layout(title=dict(text="每月單位產量耗能", x=0.5,
+    fig_u.update_layout(title=dict(text=f"{_ey} 年每月單位產量耗能", x=0.5,
                          font=dict(size=st.session_state.get("fmt",{}).get("enb_title_size", 16))),
                          xaxis=dict(tickfont=dict(size=_enbcf)), yaxis=dict(tickfont=dict(size=_enbcf)),
                          legend=dict(font=dict(size=_enbcf)),
@@ -4320,22 +4807,23 @@ elif "單位產量耗能" in menu:
         icon = "🔴" if exceeded else "⚪"
         with st.expander(f"{icon} {m}月{warn}", expanded=False):
             if st.session_state["edit_mode"]:
-                r = st.text_area("原因", value=enb_u["reason"][i], key=f"eu_reason_{m}")
-                a = st.text_area("預防／處置", value=enb_u["action"][i], key=f"eu_action_{m}")
-                if st.button(f"💾 儲存 {m} 月差異分析", key=f"eu_save_diff_{m}"):
+                r = st.text_area("原因", value=enb_u["reason"][i], key=f"eu_reason_{_ey}_{m}")
+                a = st.text_area("預防／處置", value=enb_u["action"][i], key=f"eu_action_{_ey}_{m}")
+                if st.button(f"💾 儲存 {m} 月差異分析", key=f"eu_save_diff_{_ey}_{m}"):
                     enb_u["reason"][i], enb_u["action"][i] = r, a
-                    st.session_state["enb"]["monthly_unit"] = enb_u
+                    _enb_mark_edited(_ey, "monthly_unit")
                     save_enb(st.session_state["enb"])
                     st.success("✅ 已儲存！")
                     st.rerun()
             else:
                 st.markdown(f"**原因：** {enb_u['reason'][i] or '—'}")
                 st.markdown(f"**預防／處置：** {enb_u['action'][i] or '—'}")
+    _enb_admin_box("unit")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ── 頁面：能源基線追蹤－整廠用電量
 # ─────────────────────────────────────────────────────────────────────────────
-elif "整廠用電量" in menu:
+elif menu == "能源基線追蹤-整廠用電量":
     st.subheader("⚡ 能源基線追蹤－整廠用電量")
     st.caption("比較本年度整廠用電量與上年度同期基線及基線調整範圍")
     st.markdown(f"""
@@ -4346,14 +4834,17 @@ elif "整廠用電量" in menu:
 
     MONTHS = list(range(1, 13))
     MONTH_LABELS = [f"{m}月" for m in MONTHS]
-    enb_p = st.session_state["enb"]["plant"]
+    _ey, _eyd, enb_p = _enb_page_header("plant")         # v3.8：年份選單（2026 起由原始數據計算）
+    if enb_p is None:
+        _enb_admin_box("plant")
+        st.stop()
     enb_p.setdefault("reason", [""] * 12)
     enb_p.setdefault("action", [""] * 12)
 
     # ── 修改模式：逐月填報表單 ──────────────────────────────
     if st.session_state["edit_mode"]:
         with st.expander("✏️ 編輯整廠用電量與基線設定", expanded=False):
-            with st.form("enb_plant_form"):
+            with st.form(f"enb_plant_form_{_ey}"):
                 cols = st.columns(4)
                 new_actual, new_base, new_up, new_low = [], [], [], []
                 for i, m in enumerate(MONTHS):
@@ -4361,21 +4852,21 @@ elif "整廠用電量" in menu:
                         st.markdown(f"**{m} 月**")
                         new_actual.append(st.number_input(
                             "本年度整廠電量(kWh)", min_value=0.0,
-                            value=float(enb_p["actual"][i] or 0), key=f"pl_act_{m}"))
+                            value=float(enb_p["actual"][i] or 0), key=f"pl_act_{_ey}_{m}"))
                         new_base.append(st.number_input(
                             "上年度基線(kWh)", min_value=0.0,
-                            value=float(enb_p["baseline_prev"][i] or 0), key=f"pl_base_{m}"))
+                            value=float(enb_p["baseline_prev"][i] or 0), key=f"pl_base_{_ey}_{m}"))
                         new_up.append(st.number_input(
                             "基線調整上限(kWh)", min_value=0.0,
-                            value=float(enb_p["adj_upper"][i] or 0), key=f"pl_up_{m}"))
+                            value=float(enb_p["adj_upper"][i] or 0), key=f"pl_up_{_ey}_{m}"))
                         new_low.append(st.number_input(
                             "基線調整下限(kWh)", min_value=0.0,
-                            value=float(enb_p["adj_lower"][i] or 0), key=f"pl_low_{m}"))
+                            value=float(enb_p["adj_lower"][i] or 0), key=f"pl_low_{_ey}_{m}"))
                         st.divider()
                 if st.form_submit_button("💾 儲存整廠用電量設定", use_container_width=True):
                     enb_p["actual"], enb_p["baseline_prev"] = new_actual, new_base
                     enb_p["adj_upper"], enb_p["adj_lower"] = new_up, new_low
-                    st.session_state["enb"]["plant"] = enb_p
+                    _enb_mark_edited(_ey, "plant")
                     save_enb(st.session_state["enb"])
                     st.success("✅ 已儲存！")
                     st.rerun()
@@ -4409,7 +4900,7 @@ elif "整廠用電量" in menu:
                                 mode="lines", line=dict(color="#ef4444", width=2)))
     fig_p.add_trace(go.Scatter(x=MONTH_LABELS, y=enb_p["adj_lower"], name="基線調整下限",
                                 mode="lines", line=dict(color="#ef4444", width=2)))
-    fig_p.update_layout(title=dict(text="整廠用電量", x=0.5,
+    fig_p.update_layout(title=dict(text=f"{_ey} 年整廠用電量", x=0.5,
                          font=dict(size=st.session_state.get("fmt",{}).get("enb_title_size", 16))),
                          xaxis=dict(tickfont=dict(size=_enbcf2)), yaxis=dict(tickfont=dict(size=_enbcf2)),
                          legend=dict(font=dict(size=_enbcf2)),
@@ -4437,104 +4928,245 @@ elif "整廠用電量" in menu:
         icon = "🔴" if exceeded else "⚪"
         with st.expander(f"{icon} {m}月{warn}", expanded=False):
             if st.session_state["edit_mode"]:
-                r = st.text_area("原因", value=enb_p["reason"][i], key=f"pl_reason_{m}")
-                a = st.text_area("預防／處置", value=enb_p["action"][i], key=f"pl_action_{m}")
-                if st.button(f"💾 儲存 {m} 月差異分析", key=f"pl_save_diff_{m}"):
+                r = st.text_area("原因", value=enb_p["reason"][i], key=f"pl_reason_{_ey}_{m}")
+                a = st.text_area("預防／處置", value=enb_p["action"][i], key=f"pl_action_{_ey}_{m}")
+                if st.button(f"💾 儲存 {m} 月差異分析", key=f"pl_save_diff_{_ey}_{m}"):
                     enb_p["reason"][i], enb_p["action"][i] = r, a
-                    st.session_state["enb"]["plant"] = enb_p
+                    _enb_mark_edited(_ey, "plant")
                     save_enb(st.session_state["enb"])
                     st.success("✅ 已儲存！")
                     st.rerun()
             else:
                 st.markdown(f"**原因：** {enb_p['reason'][i] or '—'}")
                 st.markdown(f"**預防／處置：** {enb_p['action'][i] or '—'}")
+    _enb_admin_box("plant")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ── 頁面：能源基線追蹤－重大能源使用設備（個別設備，動態偵測）
 # ─────────────────────────────────────────────────────────────────────────────
-elif "重大設備" in menu:
-    st.subheader("⚡ 能源基線追蹤－重大能源使用設備")
-    st.caption(
-        "個別重大耗能設備（如研磨機、大型攪拌機）各自的能源基線追蹤。"
-        "此資料只能透過 Excel 同步，不提供頁面手動編輯——"
-        "請切換到「✏️ 修改模式」，至「從Excel重新載入」頁面點擊「同步『重大設備』表」。"
-    )
+elif menu in ("能源基線追蹤-大型攪拌機系統單位產量耗能", "能源基線追蹤-研磨機系統能源效率"):
+    # v3.8：原「重大設備」頁拆成大型攪拌機、研磨機兩頁，各自有年份選單；資料只透過上傳 Excel 更新（沿用原本不提供網頁編輯）
+    _item = "mixer" if "攪拌機" in menu else "grinder"
+    st.subheader(f"⚡ 能源基線追蹤－{ENB_ITEMS[_item]}")
+    st.caption("重大能源使用設備的能源基線追蹤。資料來自上傳的「各項能源基線追蹤表」Excel，由管理員在「🔒 能源基線資料管理」更新。")
     st.markdown(f"""
     <style>
     div[data-testid="stMetricValue"] {{ font-size: {st.session_state.get("fmt", {}).get("enb_title_size", 16)}px; }}
     </style>
     """, unsafe_allow_html=True)
+    _ey, _eyd, eq = _enb_page_header(_item)
+    if eq is None:
+        _enb_admin_box(_item)
+        st.stop()
+    months = eq["months"]
+    month_labels = [f"{m}月" for m in months]
+    numerator, denominator = eq["numerator"], eq["denominator"]
+    ratio = [round(nu / de, 2) if (nu and de) else None for nu, de in zip(numerator, denominator)]
+    valid_ratio = [v for v in ratio if v is not None]
+    avg_ratio = round(sum(valid_ratio) / len(valid_ratio), 2) if valid_ratio else 0
+    exceed_flags = [v is not None and up is not None and low is not None and (v > up or v < low)
+                    for v, up, low in zip(ratio, eq["adj_upper"], eq["adj_lower"])]
+    _unit = f"{eq['numerator_label']} / {eq['denominator_label']}"
+    k1, k2, k3 = st.columns(3)
+    k1.metric("年度平均", f"{avg_ratio:,.2f}")
+    k2.metric("⚠️ 超出基線月份數", f"{sum(exceed_flags)} 個月")
+    k3.metric("已填報月份數", f"{len(valid_ratio)} / {len(months)}")
+    fig_e = go.Figure()
+    _enbcf3 = st.session_state.get("fmt", {}).get("enb_chart_font_size", 13)
+    fig_e.add_trace(go.Scatter(x=month_labels, y=ratio, name=_unit,
+                               mode="lines+markers", line=dict(color="#22c55e", width=3)))
+    fig_e.add_trace(go.Scatter(x=month_labels, y=eq["std"], name="能源標準基線",
+                               mode="lines", line=dict(color="#fbbf24", width=2, dash="dot")))
+    fig_e.add_trace(go.Scatter(x=month_labels, y=eq["adj_upper"], name="基線調整上限",
+                               mode="lines", line=dict(color="#ef4444", width=2)))
+    fig_e.add_trace(go.Scatter(x=month_labels, y=eq["adj_lower"], name="基線調整下限",
+                               mode="lines", line=dict(color="#ef4444", width=2)))
+    fig_e.update_layout(title=dict(text=f"{_ey} 年{eq['title']}", x=0.5,
+                                   font=dict(size=st.session_state.get("fmt", {}).get("enb_title_size", 16))),
+                        xaxis=dict(tickfont=dict(size=_enbcf3)), yaxis=dict(tickfont=dict(size=_enbcf3)),
+                        legend=dict(font=dict(size=_enbcf3)),
+                        height=420, plot_bgcolor="white", paper_bgcolor="white", hovermode="x unified")
+    st.plotly_chart(fig_e, use_container_width=True)
+    st.divider()
+    df_e = pd.DataFrame({
+        "月份": month_labels,
+        eq["numerator_label"]:   [f"{v:,.2f}" if v is not None else "—" for v in numerator],
+        eq["denominator_label"]: [f"{v:,.2f}" if v is not None else "—" for v in denominator],
+        _unit if len(_unit) < 30 else "比值": [f"{v:,.2f}" if v is not None else "—" for v in ratio],
+        "能源標準基線": [f"{v:,.2f}" if v is not None else "—" for v in eq["std"]],
+        "基線調整上限": [f"{v:,.2f}" if v is not None else "—" for v in eq["adj_upper"]],
+        "基線調整下限": [f"{v:,.2f}" if v is not None else "—" for v in eq["adj_lower"]],
+    })
+    centered_table(df_e, context="enb")
+    _diff = eq.get("diff", {}) or {}
+    st.divider()
+    st.subheader("📋 差異分析")
+    for k, m in enumerate(months):
+        d = _diff.get(str(m)) or _diff.get(m) or {}
+        icon = "🔴" if exceed_flags[k] else "⚪"
+        with st.expander(f"{icon} {m}月", expanded=False):
+            st.markdown(f"**原因：** {d.get('reason') or '—'}")
+            st.markdown(f"**預防／處置：** {d.get('action') or '—'}")
+    _enb_admin_box(_item)
 
-    equipment_list = st.session_state["enb"].get("equipment", [])
+# ─────────────────────────────────────────────────────────────────────────────
+# ── 頁面：能源基線資料管理（v3.8，僅管理員）
+# ─────────────────────────────────────────────────────────────────────────────
+elif menu == "能源基線資料管理":
+    if not st.session_state.get("logged_in"):
+        st.warning("請先登入管理員帳號")
+        st.stop()
+    st.subheader("📂 能源基線資料管理")
+    st.caption("上傳整份「各項能源基線追蹤表」Excel：四個能源基線頁面的資料會依年度更新；原始檔原封不動保存在雲端，"
+               "只有管理員能下載（與上傳檔完全相同）。各電號用電、各單位產量、各機台數據等限制資料只在本頁與各頁的管理員專區顯示。")
+    _enb = st.session_state["enb"]
+    _yrs = _enb.get("years", {})
+    _KEYS = {"unit": "monthly_unit", "plant": "plant"}
+    if _flash := st.session_state.pop("enb_flash", None):
+        st.success(_flash)
 
-    if not equipment_list:
-        st.info("尚未同步任何設備資料，目前清單是空的。請先至「從Excel重新載入」頁面同步一次。")
+    # ── 1. 目前網頁上的資料 ──
+    st.markdown("#### 📊 目前網頁上的資料")
+    _rows = []
+    for _it, _nm in ENB_ITEMS.items():
+        _tags = []
+        for _y in enb_years_for(_it):
+            _yd = _yrs[_y]
+            _k = _KEYS.get(_it)
+            _t = f"{_y}"
+            if _k and (_yd.get("computed") or {}).get(_k):
+                _t += "（計算）"
+            if _k and (_yd.get("edited") or {}).get(_k):
+                _t += "（網頁修改）"
+            _tags.append(_t)
+        _rows.append({"項目": _nm, "年度": "、".join(_tags) or "尚無資料"})
+    st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
+    if _enb.get("migrated_from_legacy") and not _enb.get("files"):
+        st.caption("ℹ️ 目前是舊版單一年度資料（暫放 2025 年）；上傳 Excel 後會依各分頁年度更新。")
+
+    # ── 2. 上傳 Excel ──
+    st.markdown("#### 📤 上傳各項能源基線追蹤表")
+    if not st.session_state["edit_mode"]:
+        st.info("請切換至「✏️ 修改模式」才能上傳。")
     else:
-        for eq in equipment_list:
-            months = eq["months"]
-            month_labels = [f"{m}月" for m in months]
-            numerator, denominator = eq["numerator"], eq["denominator"]
+        _up = st.file_uploader("選擇 Excel（.xlsx）", type=["xlsx"],
+                               key=f"enb_upload_{st.session_state.get('enb_up_ver', 0)}")
+        if _up is not None:
+            _bytes = _up.getvalue()
+            _md5 = hashlib.md5(_bytes).hexdigest()
+            _pc = st.session_state.get("enb_parse")
+            if not _pc or _pc[0] != _md5:
+                _res, _perr = parse_enb_workbook(_bytes)
+                _pc = (_md5, _res, _perr)
+                st.session_state["enb_parse"] = _pc
+            _, _res, _perr = _pc
+            if _perr:
+                st.error(f"❌ {_perr}")
+            else:
+                _pyrs = _res["years"]
+                st.markdown("**偵測結果**")
+                _det = []
+                for _it, _nm in ENB_ITEMS.items():
+                    _ys = []
+                    for _y in sorted(_pyrs, reverse=True):
+                        if _enb_item_data(_pyrs[_y], _it):
+                            _k = _KEYS.get(_it)
+                            _ys.append(_y + ("（由原始數據計算）" if _k and (_pyrs[_y].get("computed") or {}).get(_k) else ""))
+                    _det.append({"項目": _nm, "Excel 裡的年度": "、".join(_ys) or "—"})
+                st.dataframe(pd.DataFrame(_det), hide_index=True, use_container_width=True)
+                st.caption("公開分頁：" + "、".join(_res["perf_sheets"]))
+                st.caption("限制分頁（僅管理員）：" + "、".join(
+                    x + ("（隱藏）" if x in _res["hidden_sheets"] else "") for x in _res["restricted_sheets"]))
+                for _w in _res["warnings"]:
+                    st.warning(f"⚠️ {_w}")
 
-            ratio = []
-            for k in range(len(months)):
-                num, den = numerator[k], denominator[k]
-                ratio.append(round(num / den, 2) if (num and den) else None)
+                st.markdown("**要匯入的項目**（沒勾的項目維持網頁上現有的資料；原始檔一律保存）")
+                _cc = st.columns(4)
+                _pick = {}
+                for _ci, (_it, _nm) in enumerate(ENB_ITEMS.items()):
+                    _has = any(_enb_item_data(_pyrs[_y], _it) for _y in _pyrs)
+                    _pick[_it] = _cc[_ci].checkbox(_nm, value=_has, disabled=not _has, key=f"enb_pick_{_it}_{_md5[:6]}")
+                # 網頁修改過、將被覆蓋的項目
+                _conf = []
+                for _it, _on in _pick.items():
+                    if not _on:
+                        continue
+                    _k = _KEYS.get(_it)
+                    for _y in _pyrs:
+                        if _enb_item_data(_pyrs[_y], _it) and _k and (_yrs.get(_y, {}).get("edited") or {}).get(_k):
+                            _conf.append(f"{_y} 年 {ENB_ITEMS[_it]}（網頁修改於 {_yrs[_y]['edited'][_k]}）")
+                _ok_conf = True
+                if _conf:
+                    st.warning("⚠️ 以下年度在網頁上修改過，匯入後會被 Excel 的內容取代：\n\n" + "\n".join(f"- {c}" for c in _conf))
+                    _ok_conf = st.checkbox("我確認以 Excel 覆蓋這些網頁修改", key=f"enb_conf_{_md5[:6]}")
+                if st.button("✅ 匯入並保存原始檔", type="primary", use_container_width=True,
+                             disabled=not _ok_conf, key="enb_import_go"):
+                    _meta, _serr = enb_store_file(_bytes, _up.name)
+                    if _serr:
+                        st.error(f"❌ {_serr}（資料沒有匯入）")
+                    else:
+                        _src_lbl = f"{_up.name}（{_meta['uploaded_at']} 上傳）"
+                        _done = []
+                        for _it, _on in _pick.items():
+                            if not _on:
+                                continue
+                            for _y, _pyd in _pyrs.items():
+                                _dat = _enb_item_data(_pyd, _it)
+                                if not _dat:
+                                    continue
+                                _yd = _yrs.setdefault(_y, {})
+                                _k = _KEYS.get(_it)
+                                if _k:
+                                    _yd[_k] = _dat
+                                    _yd.setdefault("computed", {})[_k] = bool((_pyd.get("computed") or {}).get(_k))
+                                    (_yd.get("edited") or {}).pop(_k, None)
+                                    _sh = "各年度整廠用電／各年度整廠產量（計算）" if _yd["computed"][_k] else (_pyd.get("_sheet") or {}).get(_it, "")
+                                else:
+                                    _kw = ENB_EQ_KEYWORD[_it]
+                                    _yd["equipment"] = [e for e in (_yd.get("equipment") or []) if _kw not in str(e.get("title", ""))] + [_dat]
+                                    _sh = (_pyd.get("_sheet") or {}).get(_it, "")
+                                _yd.setdefault("sources", {})[_it] = f"{_sh} — {_src_lbl}"
+                                _done.append(f"{_y} {ENB_ITEMS[_it]}")
+                        _enb.setdefault("files", []).append(_meta)
+                        _enb.pop("migrated_from_legacy", None)
+                        save_enb(_enb)
+                        log_activity("能源基線上傳", f"{_up.name}（{_meta['size'] / 1024:,.0f} KB）；匯入：{'、'.join(_done) or '無（只保存原始檔）'}")
+                        st.session_state["enb_flash"] = (f"✅ 已保存原始檔並匯入 {len(_done)} 項："
+                                                         f"{'、'.join(_done) or '（未匯入資料，只保存原始檔）'}"
+                                                         + ("" if _meta["where"] == "cloud" else "（未設定 Supabase，原始檔只存在本機）"))
+                        st.session_state.pop("enb_parse", None)
+                        st.session_state["enb_up_ver"] = st.session_state.get("enb_up_ver", 0) + 1
+                        st.rerun()
 
-            valid_ratio = [v for v in ratio if v is not None]
-            avg_ratio = round(sum(valid_ratio) / len(valid_ratio), 2) if valid_ratio else 0
+    # ── 3. 原始檔版本 ──
+    st.markdown("#### 🗂️ 原始檔版本（最新在上）")
+    _files = _enb.get("files") or []
+    if not _files:
+        st.info("尚未上傳過原始檔。")
+    else:
+        for _i, _m in enumerate(reversed(_files)):
+            with st.container(border=True):
+                _c1, _c2 = st.columns([3, 2], vertical_alignment="center")
+                _c1.markdown(f"**{_m['name']}**" + ("　🆕 最新" if _i == 0 else "")
+                             + f"<br><span style='font-size:0.85em;color:#64748b'>上傳於 {_m['uploaded_at']}｜"
+                               f"{_m['size'] / 1024:,.0f} KB｜MD5 {_m['md5']}｜{'☁️ 雲端' if _m.get('where') == 'cloud' else '💾 本機'}</span>",
+                             unsafe_allow_html=True)
+                with _c2:
+                    _enb_download_button(_m, f"ver_{_m['key']}")
 
-            exceed_flags = []
-            for k in range(len(months)):
-                v, up, low = ratio[k], eq["adj_upper"][k], eq["adj_lower"][k]
-                exceed_flags.append(v is not None and up is not None and low is not None
-                                     and (v > up or v < low))
-
-            with st.expander(f"⚙️ {eq['title']}", expanded=True):
-                k1, k2, k3 = st.columns(3)
-                k1.metric("平均值", f"{avg_ratio:,.2f}")
-                k2.metric("⚠️ 超出基線月份數", f"{sum(exceed_flags)} 個月")
-                k3.metric("已填報月份數", f"{len(valid_ratio)} / {len(months)}")
-
-                fig_e = go.Figure()
-                _enbcf3 = st.session_state.get("fmt", {}).get("enb_chart_font_size", 13)
-                fig_e.add_trace(go.Scatter(
-                    x=month_labels, y=ratio,
-                    name=f"{eq['numerator_label']} / {eq['denominator_label']}",
-                    mode="lines+markers", line=dict(color="#22c55e", width=3)))
-                fig_e.add_trace(go.Scatter(x=month_labels, y=eq["std"], name="能源標準基線",
-                                            mode="lines", line=dict(color="#fbbf24", width=2, dash="dot")))
-                fig_e.add_trace(go.Scatter(x=month_labels, y=eq["adj_upper"], name="基線調整上限",
-                                            mode="lines", line=dict(color="#ef4444", width=2)))
-                fig_e.add_trace(go.Scatter(x=month_labels, y=eq["adj_lower"], name="基線調整下限",
-                                            mode="lines", line=dict(color="#ef4444", width=2)))
-                fig_e.update_layout(title=dict(text=eq["title"], x=0.5,
-                                     font=dict(size=st.session_state.get("fmt",{}).get("enb_title_size", 16))),
-                                     xaxis=dict(tickfont=dict(size=_enbcf3)), yaxis=dict(tickfont=dict(size=_enbcf3)),
-                                     legend=dict(font=dict(size=_enbcf3)),
-                                     height=380, plot_bgcolor="white", paper_bgcolor="white", hovermode="x unified")
-                st.plotly_chart(fig_e, use_container_width=True)
-
-                df_e = pd.DataFrame({
-                    "月份": month_labels,
-                    eq["numerator_label"]:   [f"{v:,.2f}" if v is not None else "—" for v in numerator],
-                    eq["denominator_label"]: [f"{v:,.2f}" if v is not None else "—" for v in denominator],
-                    "比值":       [f"{v:,.2f}" if v is not None else "—" for v in ratio],
-                    "能源標準基線": [f"{v:,.2f}" if v is not None else "—" for v in eq["std"]],
-                    "基線調整上限": [f"{v:,.2f}" if v is not None else "—" for v in eq["adj_upper"]],
-                    "基線調整下限": [f"{v:,.2f}" if v is not None else "—" for v in eq["adj_lower"]],
-                })
-                centered_table(df_e, context="enb")
-
-                diff = eq.get("diff", {})
-                if diff:
-                    st.markdown("**📋 差異分析**")
-                    for month_num in sorted(diff.keys()):
-                        d = diff[month_num]
-                        icon = "🔴" if (d.get("reason") or d.get("action")) else "⚪"
-                        st.markdown(
-                            f"{icon} **{month_num}月** — 原因：{d.get('reason') or '—'}　"
-                            f"／　預防處置：{d.get('action') or '—'}"
-                        )
+        # ── 4. 限制資料檢視 ──
+        st.markdown("#### 🔒 原始數據檢視（限制資料）")
+        _vm = st.selectbox("原始檔版本", list(reversed(_files)), format_func=lambda m: f"{m['name']}（{m['uploaded_at']}）",
+                           key="enb_view_ver")
+        if st.toggle("載入並顯示原始檔內容", key="enb_view_on"):
+            _raw, _rerr = _enb_get_raw(_vm)
+            if _rerr:
+                st.error(f"❌ {_rerr}")
+            else:
+                _xls = pd.ExcelFile(BytesIO(_raw))
+                _sheet = st.selectbox("工作表", _xls.sheet_names, key="enb_view_sheet")
+                _df = pd.read_excel(_xls, sheet_name=_sheet, header=None).dropna(how="all").dropna(axis=1, how="all")
+                st.dataframe(_df.astype(str).replace({"nan": "", "None": ""}), hide_index=True, use_container_width=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ── 頁面四：從 Excel 重新載入
@@ -4798,59 +5430,9 @@ elif "Excel" in menu:
     st.markdown(f"本地存檔：`{DB_JSON}`（{'✅ 已存在' if os.path.exists(DB_JSON) else '⚠️ 尚未建立'}）")
 
     st.divider()
-    st.subheader("🔋 能源基線追蹤表（EnB）同步")
-    st.caption(
-        f"這兩張表是從**另一份** Excel（{ENB_EXCEL_FILE}）讀取，"
-        "取名稱同時含「全廠」與「能源基線」字樣的分頁（例如「2025年能源績效指標與能源基線-全廠」），"
-        "『每月單位產量耗能』與『整廠用電量』兩張表會疊在同一個分頁裡，"
-        "程式會以「整廠用電量」標題自動切開兩張表分別讀取，"
-        "右側『差異分析』附表（月份／原因／預防處置）也會一併讀入。"
-    )
-
-    if not os.path.exists(ENB_EXCEL_FILE):
-        st.info(f"未偵測到「{ENB_EXCEL_FILE}」（或檔名含「各項能源基線追蹤表」的檔案），"
-                "能源基線追蹤表暫時只能透過頁面上的表單手動編輯。")
-    elif not st.session_state["edit_mode"]:
-        st.info("請切換至「✏️ 修改模式」才能執行同步。")
-    else:
-        b1, b2, b3 = st.columns(3)
-        with b1:
-            if st.button("🔄 同步「單位產量耗能」表", use_container_width=True):
-                data, err = read_enb_monthly_unit_from_excel()
-                if err:
-                    st.error(f"❌ {err}")
-                else:
-                    st.session_state["enb"]["monthly_unit"] = data
-                    save_enb(st.session_state["enb"])
-                    log_activity("同步EnB", "單位產量耗能")
-                    st.success("✅ 已從 Excel 同步「每月單位產量耗能」！")
-                    st.rerun()
-        with b2:
-            if st.button("🔄 同步「整廠用電量」表", use_container_width=True):
-                data, err = read_enb_plant_from_excel()
-                if err:
-                    st.error(f"❌ {err}")
-                else:
-                    st.session_state["enb"]["plant"] = data
-                    save_enb(st.session_state["enb"])
-                    log_activity("同步EnB", "整廠用電量")
-                    st.success("✅ 已從 Excel 同步「整廠用電量」！")
-                    st.rerun()
-        with b3:
-            if st.button("🔄 同步「重大設備」表", use_container_width=True):
-                data, err = read_enb_equipment_from_excel()
-                if err:
-                    st.error(f"❌ {err}")
-                else:
-                    st.session_state["enb"]["equipment"] = data
-                    save_enb(st.session_state["enb"])
-                    log_activity("同步EnB", f"重大設備，共 {len(data)} 組子表")
-                    st.success(f"✅ 已從 Excel 同步「重大能源使用設備」！共 {len(data)} 組子表。")
-                    st.rerun()
-        st.caption(f"目前使用的能源基線 Excel 檔案：`{ENB_EXCEL_FILE}`")
-        st.markdown(f"本地存檔：`{ENB_JSON}`（{'✅ 已存在' if os.path.exists(ENB_JSON) else '⚠️ 尚未建立'}）")
-        n_eq = len(st.session_state["enb"].get("equipment", []))
-        st.markdown(f"目前已同步「重大設備」子表數：**{n_eq}** 組")
+    st.subheader("🔋 能源基線追蹤表（EnB）")
+    st.info("v3.8 起，能源基線追蹤資料改由「🔒 能源基線資料管理」頁上傳整份「各項能源基線追蹤表」Excel 更新（支援多年度、"
+            "保存原始檔供管理員下載），並自動同步雲端，這裡不再提供單表同步。")
 
     st.divider()
     st.subheader("☁️ Supabase 雲端同步")
@@ -5008,59 +5590,7 @@ elif "Excel" in menu:
                     st.success(f"✅ {_msg}；共補回 {_total} 張"
                                f"（外觀 {_cnt['外觀照片']}、銘牌 {_cnt['銘牌照片']}、銘牌2 {_cnt['銘牌照片2']}）")
 
-            st.markdown("**能源基線追蹤（單位產量耗能／整廠用電量／重大設備）**")
-            e1, e2, e3 = st.columns(3)
-            with e1:
-                if st.button("⬆️⬇️ 單位產量耗能", use_container_width=True, key="sb_unit_menu"):
-                    st.session_state["_sb_unit_action"] = True
-                if st.session_state.get("_sb_unit_action"):
-                    uc1, uc2 = st.columns(2)
-                    if uc1.button("上傳", key="sb_push_unit", use_container_width=True):
-                        ok, msg = push_enb_monthly_unit_to_supabase(st.session_state["enb"]["monthly_unit"])
-                        (st.success if ok else st.error)(msg)
-                    if uc2.button("下載", key="sb_pull_unit", use_container_width=True):
-                        data, err = pull_enb_monthly_unit_from_supabase()
-                        if err:
-                            st.error(err)
-                        else:
-                            st.session_state["enb"]["monthly_unit"] = data
-                            save_enb(st.session_state["enb"])
-                            st.success("✅ 已下載！")
-                            st.rerun()
-            with e2:
-                if st.button("⬆️⬇️ 整廠用電量", use_container_width=True, key="sb_plant_menu"):
-                    st.session_state["_sb_plant_action"] = True
-                if st.session_state.get("_sb_plant_action"):
-                    pc1, pc2 = st.columns(2)
-                    if pc1.button("上傳", key="sb_push_plant", use_container_width=True):
-                        ok, msg = push_enb_plant_to_supabase(st.session_state["enb"]["plant"])
-                        (st.success if ok else st.error)(msg)
-                    if pc2.button("下載", key="sb_pull_plant", use_container_width=True):
-                        data, err = pull_enb_plant_from_supabase()
-                        if err:
-                            st.error(err)
-                        else:
-                            st.session_state["enb"]["plant"] = data
-                            save_enb(st.session_state["enb"])
-                            st.success("✅ 已下載！")
-                            st.rerun()
-            with e3:
-                if st.button("⬆️⬇️ 重大設備", use_container_width=True, key="sb_eq_menu"):
-                    st.session_state["_sb_eq_action"] = True
-                if st.session_state.get("_sb_eq_action"):
-                    ec1, ec2 = st.columns(2)
-                    if ec1.button("上傳", key="sb_push_eq", use_container_width=True):
-                        ok, msg = push_enb_equipment_to_supabase(st.session_state["enb"]["equipment"])
-                        (st.success if ok else st.error)(msg)
-                    if ec2.button("下載", key="sb_pull_eq", use_container_width=True):
-                        data, err = pull_enb_equipment_from_supabase()
-                        if err:
-                            st.error(err)
-                        else:
-                            st.session_state["enb"]["equipment"] = data
-                            save_enb(st.session_state["enb"])
-                            st.success("✅ 已下載！")
-                            st.rerun()
+            st.caption("能源基線追蹤資料（多年度）在「🔒 能源基線資料管理」上傳 Excel 或網頁編輯時就會自動同步雲端，不需另外上傳下載。")
 
 
     st.error(
