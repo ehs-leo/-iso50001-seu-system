@@ -2979,10 +2979,10 @@ with st.sidebar:
 
     for _gk, _opts in _groups.items():
         if _gk == "menu_enb":
-            st.markdown("<div style='font-size:0.8em;color:#93c5fd;font-weight:600;margin:6px 0 -6px'>📈 能源基線追蹤</div>",
+            st.markdown("<div style='font-size:0.8em;color:#93c5fd;font-weight:600;margin:14px 0 6px'>📈 能源基線追蹤</div>",
                         unsafe_allow_html=True)
         elif _gk == "menu_admin":
-            st.markdown("<div style='font-size:0.8em;color:#93c5fd;font-weight:600;margin:6px 0 -6px'>🔒 管理員</div>",
+            st.markdown("<div style='font-size:0.8em;color:#93c5fd;font-weight:600;margin:14px 0 6px'>🔒 管理員</div>",
                         unsafe_allow_html=True)
         _lbl = (lambda x: x.replace("能源基線追蹤-", "")) if _gk == "menu_enb" else (lambda x: x)
         if st.session_state.get(_gk) not in _opts:            # 第一次建立或選項變動：依目前頁面設定初值
