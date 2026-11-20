@@ -4992,7 +4992,28 @@ elif "負載" in menu:
 
     st.divider()
     # 表格的時間欄顯示成「1點」「2點」…（圖表與 CSV 仍用數字）
-    centered_table(df_load.assign(**{"時間(時)": df_load["時間(時)"].map(lambda h: f"{h}點")}), context="load")
+    # v3.8：資料表改成橫向（時段在上、最高／最低／平均在下），表格內左右捲動，第一欄固定；字體與對齊沿用版面設定
+    _fmtl = st.session_state.get("fmt", {})
+    _lfs = _fmtl.get("load_table_size", st.session_state.get("font_size", 14))
+    _lff = _fmtl.get("font_family", "Noto Sans TC")
+    _lal = _fmtl.get("load_table_align", st.session_state.get("table_align", "center"))
+    _num = lambda v: f"{v:,.0f}" if isinstance(v, (int, float)) and float(v).is_integer() else (f"{v:,.1f}" if isinstance(v, (int, float)) else str(v))
+    _hdr = "".join(f"<th>{h}點</th>" for h in df_load["時間(時)"])
+    _body = "".join(f"<tr><td class='lt-k'>{col}</td>" + "".join(f"<td>{_num(v)}</td>" for v in df_load[col]) + "</tr>"
+                    for col in ("最高用電(kW)", "最低用電(kW)", "平均用電(kW)"))
+    st.markdown(f"""
+    <style>
+    .lt-wrap {{ overflow-x:auto; border:1px solid #e2e8f0; border-radius:6px; margin-bottom:4px; }}
+    .lt {{ border-collapse:collapse; font-size:{_lfs}px; font-family:'{_lff}',sans-serif; white-space:nowrap; }}
+    .lt th {{ background:#1a3a5c; color:#fff; padding:8px 12px; text-align:center; font-weight:700; border:1px solid #334155; }}
+    .lt td {{ padding:7px 12px; text-align:{_lal}; border:1px solid #e2e8f0; color:#1e293b; }}
+    .lt tr:nth-child(even) td {{ background:#f8fafc; }}
+    .lt th:first-child, .lt td.lt-k {{ position:sticky; left:0; z-index:1; }}
+    .lt td.lt-k {{ background:#e2e8f0 !important; color:#1a3a5c; font-weight:700; text-align:center; }}
+    </style>
+    <div class="lt-wrap"><table class="lt"><thead><tr><th>時間(時)</th>{_hdr}</tr></thead><tbody>{_body}</tbody></table></div>
+    <div style="font-size:0.8em;color:#94a3b8;text-align:right">↔ 左右滑動看其他時段</div>
+    """, unsafe_allow_html=True)
     st.download_button(
         "⬇️ 下載負載曲線 CSV",
         df_load.to_csv(index=False).encode("utf-8-sig"),
