@@ -461,8 +461,9 @@ def _si(v):
     except:
         return None
 
-def read_system(sheet, sys_label, src=None):
-    """src：要讀的 Excel（路徑、BytesIO 或 pd.ExcelFile）；不給就讀伺服器上的 EXCEL_FILE。"""
+def read_system(sheet, sys_label, src=None, with_rows=False):
+    """src：要讀的 Excel（路徑、BytesIO 或 pd.ExcelFile）；不給就讀伺服器上的 EXCEL_FILE。
+    with_rows=True 時每筆另帶 "_xl_row"（Excel 列號，從 1 起算），給「合併回 Excel」寫回原儲存格用。"""
     try:
         df = pd.read_excel(src if src is not None else EXCEL_FILE, sheet_name=sheet, header=None)
     except Exception as e:
@@ -556,6 +557,8 @@ def read_system(sheet, sys_label, src=None):
             "_xl_pri_score":     _sf(g(row, xl_pri_c)),
             "_xl_pri_tag":       (str(g(row, xl_pri_tag_c)).strip() if g(row, xl_pri_tag_c) is not None else None),
         })
+        if with_rows:
+            recs[-1]["_xl_row"] = int(i) + 1
     return recs
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2054,10 +2057,10 @@ def _enb_pull_cloud():
 ENB_BUCKET = "enb-files"
 ENB_LOCAL_DIR = "enb_files"
 
-def enb_store_file(file_bytes, orig_name):
+def enb_store_file(file_bytes, orig_name, prefix=""):
     """保存原始檔，回傳 (版本資訊 dict, 錯誤)。Storage 檔名只用英數字（Supabase 不接受中文檔名），原始檔名記在版本資訊裡。"""
     md5 = hashlib.md5(file_bytes).hexdigest()
-    key = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{md5[:8]}.xlsx"
+    key = f"{prefix}{datetime.now().strftime('%Y%m%d_%H%M%S')}_{md5[:8]}.xlsx"
     meta = {"key": key, "name": orig_name, "size": len(file_bytes), "md5": md5,
             "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "where": "local"}
     try:
@@ -2195,6 +2198,308 @@ def _enb_admin_box(item):
             else:
                 _enb_show_raw_sheets(raw, ENB_RAW_SHEET_KEYS.get(item))
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 重大能源使用設備評估表：原始檔保存、合併回 Excel（v3.8）
+#   原始檔與能源基線同放在 Storage 私有空間（檔名前綴 seu_），版本紀錄存 app_meta（key＝seu_files）
+#   合併回 Excel：以原始檔為底，「直接修改 xlsx 裡對應儲存格的 XML」，其他內容（19 張工作表、格式、
+#   合併儲存格、圖表、外部連結、隱藏工作表）一個位元組都不動；這份檔案 openpyxl 完整模式開不了，
+#   用 openpyxl 存檔也會弄丟圖表，所以不能用它寫。公式儲存格一律不覆蓋；開啟時自動重算（fullCalcOnLoad）。
+# ─────────────────────────────────────────────────────────────────────────────
+SEU_FILES_JSON = "seu_files.json"
+SEU_WRITE_FIELDS = ("設備名稱", "設備編號", "設備型式", "設備部門", "所在棟別", "所在樓層", "消耗功率(kW)", "設備數量",
+                    "負載率", "運轉時數(hr/年)", "設備年份", "自評重大性", "能效改善頻率", "改善執行難易度",
+                    "設備管理者", "外包商承攬商", "相關變數")     # 使用年數在 Excel 是公式（自動計算），不寫
+SEU_NUM_FIELDS = {"消耗功率(kW)", "設備數量", "負載率", "運轉時數(hr/年)", "設備年份", "自評重大性", "能效改善頻率", "改善執行難易度"}
+SEU_LOG_SHEET = "網頁更新紀錄"
+
+def seu_col_map(lit):
+    """表4 各欄位的欄號（0 起算），與 read_system 讀取的位置相同；照明系統多兩欄，整組右移"""
+    return {"設備名稱": 1, "設備編號": 2, "設備型式": 3, "設備部門": 6 if lit else 4, "所在棟別": 7 if lit else 5,
+            "所在樓層": 8 if lit else 6, "消耗功率(kW)": 9 if lit else 7, "設備數量": 10 if lit else 8,
+            "負載率": 11 if lit else 9, "運轉時數(hr/年)": 13 if lit else 11, "設備年份": 14 if lit else 12,
+            "使用年數": 15 if lit else 13, "自評重大性": 20 if lit else 18, "能效改善頻率": 19 if lit else 17,
+            "改善執行難易度": 21 if lit else 19, "設備管理者": 36 if lit else 34, "外包商承攬商": 37 if lit else 35,
+            "相關變數": 38 if lit else 36}
+
+def seu_files_load():
+    try:
+        with open(SEU_FILES_JSON, "r", encoding="utf-8") as f:
+            return json.load(f) or []
+    except Exception:
+        pass
+    sb = get_supabase_client()
+    if sb:
+        try:
+            rows = sb.table("app_meta").select("value").eq("key", "seu_files").execute().data or []
+            if rows and rows[0].get("value"):
+                return json.loads(rows[0]["value"])
+        except Exception:
+            pass
+    return []
+
+def seu_files_save(files):
+    try:
+        with open(SEU_FILES_JSON, "w", encoding="utf-8") as f:
+            json.dump(files, f, ensure_ascii=False)
+    except Exception:
+        pass
+    sb = get_supabase_client()
+    if sb:
+        try:
+            sb.table("app_meta").upsert({"key": "seu_files", "value": json.dumps(files, ensure_ascii=False),
+                                         "updated_at": datetime.now().isoformat()}, on_conflict="key").execute()
+        except Exception:
+            pass
+
+def _xl_col(idx0):
+    s_, n = "", idx0 + 1
+    while n:
+        n, r = divmod(n - 1, 26)
+        s_ = chr(65 + r) + s_
+    return s_
+
+def _xl_col_idx(letters):
+    n = 0
+    for ch in letters:
+        n = n * 26 + (ord(ch) - 64)
+    return n - 1
+
+def _xml_esc(t):
+    return (str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;"))
+
+def _xl_cell_xml(ref, value, style=None):
+    sa = f' s="{style}"' if style is not None else ""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        v = int(value) if float(value).is_integer() else value
+        return f'<c r="{ref}"{sa}><v>{v}</v></c>'
+    return f'<c r="{ref}"{sa} t="inlineStr"><is><t xml:space="preserve">{_xml_esc(value)}</t></is></c>'
+
+def _xl_set_cells(xml, writes):
+    """在工作表 XML 裡改寫多個儲存格。writes：[(列號, 欄號0起, 值)]。
+    回傳 (新 XML, {(列, 欄): "ok"/"formula"/"norow"})。公式儲存格不改；保留原本的樣式（s 屬性）。"""
+    status = {}
+    by_row = {}
+    for r, c, v in writes:
+        by_row.setdefault(r, []).append((c, v))
+    for r, cells in by_row.items():
+        m = re.search(r'<row\b[^>]*\br="%d"[^>]*?(?:/>|>.*?</row>)' % r, xml, re.S)
+        if not m:
+            for c, _v in cells:
+                status[(r, c)] = "norow"
+            continue
+        row_xml = m.group(0)
+        if row_xml.endswith("/>"):
+            row_xml = row_xml[:-2] + "></row>"
+        for c, v in sorted(cells):
+            ref = f"{_xl_col(c)}{r}"
+            cm = re.search(r'<c\b[^>]*\br="%s"[^>]*?(?:/>|>.*?</c>)' % ref, row_xml, re.S)
+            if cm:
+                old = cm.group(0)
+                if "<f" in old:
+                    status[(r, c)] = "formula"
+                    continue
+                sm = re.search(r'\bs="(\d+)"', old[:old.find(">") + 1])
+                row_xml = row_xml[:cm.start()] + _xl_cell_xml(ref, v, sm.group(1) if sm else None) + row_xml[cm.end():]
+            else:
+                new_c = _xl_cell_xml(ref, v)
+                pos = None
+                for om in re.finditer(r'<c\b[^>]*\br="([A-Z]+)%d"' % r, row_xml):
+                    if _xl_col_idx(om.group(1)) > c:
+                        pos = om.start()
+                        break
+                if pos is None:
+                    pos = row_xml.rfind("</row>")
+                row_xml = row_xml[:pos] + new_c + row_xml[pos:]
+            status[(r, c)] = "ok"
+        xml = xml[:m.start()] + row_xml + xml[m.end():]
+    return xml, status
+
+def _xl_log_sheet_xml(rows, widths):
+    """新工作表（網頁更新紀錄）XML：rows 為 [[值…]]，全部用 inline 字串／數字，不動 styles.xml"""
+    cols = "".join(f'<col min="{i + 1}" max="{i + 1}" width="{w}" customWidth="1"/>' for i, w in enumerate(widths))
+    body = []
+    for ri, row in enumerate(rows, start=1):
+        cells = "".join(_xl_cell_xml(f"{_xl_col(ci)}{ri}", v) for ci, v in enumerate(row) if v not in (None, ""))
+        body.append(f'<row r="{ri}">{cells}</row>')
+    return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            f'<cols>{cols}</cols><sheetData>{"".join(body)}</sheetData></worksheet>')
+
+def _xl_sheet_paths(zf):
+    wb = zf.read("xl/workbook.xml").decode("utf-8")
+    rels = zf.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+    rid2t = {m.group(1): m.group(2) for m in re.finditer(r'<Relationship\b[^>]*\bId="([^"]+)"[^>]*\bTarget="([^"]+)"', rels)}
+    rid2t.update({m.group(2): m.group(1) for m in re.finditer(r'<Relationship\b[^>]*\bTarget="([^"]+)"[^>]*\bId="([^"]+)"', rels)})
+    out = {}
+    for m in re.finditer(r'<sheet\b[^>]*\bname="([^"]+)"[^>]*\br:id="([^"]+)"', wb):
+        t = rid2t.get(m.group(2), "")
+        out[_html.unescape(m.group(1))] = t.lstrip("/") if t.startswith("/") else "xl/" + t
+    return out
+
+def seu_build_plan(raw, db):
+    """比對原始評估表與網頁資料，回傳合併計畫：
+    {"devices": [{"kind": "update"/"pair", "sheet", "row", "name", "code", "sys", "writes": [(欄位, 欄號, 原值, 新值)]}],
+     "new": [網頁新增設備 dict], "excel_only": [(系統, 名稱, 編號)], "same": 台數}"""
+    xls = pd.ExcelFile(BytesIO(raw))
+    xl = []
+    for sys_name, sh in SYSTEM_SHEETS.items():
+        if sh in xls.sheet_names:
+            for r_ in read_system(sh, sys_name, xls, with_rows=True):
+                r_["_xl_sheet"] = sh
+                xl.append(r_)
+    items, n_same, web_only, _fills, _pairs, match = compare_excel_with_db(xl, db, with_match=True)
+    devices, same = [], 0
+    for j, x in enumerate(xl):
+        if j not in match:
+            continue
+        i, how = match[j]
+        w = db[i]
+        cmap = seu_col_map("照明" in x["_xl_sheet"])
+        writes = []
+        for f in SEU_WRITE_FIELDS:
+            wv, ev = _mnorm(w.get(f)), _mnorm(x.get(f))
+            if wv == "" or wv == ev or (f in SEU_NUM_FIELDS and wv == "0" and ev != ""):
+                continue                       # 網頁空白（數值欄的 0 多半是沒填）不清掉 Excel；相同不動
+            if f == "設備編號" and not _has_real_code(w):
+                continue                       # NOID_序號是網頁自動補的，不寫回 Excel
+            nv = _sf(w.get(f)) if f in SEU_NUM_FIELDS else " ".join(str(w.get(f)).split())
+            if nv is None:
+                continue
+            writes.append((f, cmap[f], ev, nv))
+        if writes:
+            devices.append({"kind": "pair" if how == "pair" else "update", "sheet": x["_xl_sheet"], "row": x["_xl_row"],
+                            "sys": x["系統別"], "name": " ".join(str(w.get("設備名稱") or "").split()),
+                            "code": str(w.get("設備編號") or ""), "writes": writes})
+        else:
+            same += 1
+    excel_only = [(x["系統別"], " ".join(str(x.get("設備名稱") or "").split()), x.get("設備編號") or "（無編號）")
+                  for j, x in enumerate(xl) if j not in match]
+    new = [db[k] for k in web_only]
+    return {"devices": devices, "new": new, "excel_only": excel_only, "same": same, "n_excel": len(xl)}
+
+def seu_build_xlsx(raw, plan, picked_idx, base_name):
+    """依合併計畫產生更新後的 xlsx（bytes）。picked_idx：要寫回的 devices 索引。
+    回傳 (bytes, 實際寫入的明細 [(系統, 名稱, 編號, 欄位, 原值, 新值)], 公式略過 [(…)], 錯誤)"""
+    import zipfile
+    zin = zipfile.ZipFile(BytesIO(raw))
+    paths = _xl_sheet_paths(zin)
+    sheet_writes, meta = {}, {}
+    for k in picked_idx:
+        d = plan["devices"][k]
+        for f, c, ov, nv in d["writes"]:
+            sheet_writes.setdefault(d["sheet"], []).append((d["row"], c, nv))
+            meta[(d["sheet"], d["row"], c)] = (d["sys"], d["name"], d["code"], f, ov, nv)
+    changed, done, skipped = {}, [], []
+    for sh, writes in sheet_writes.items():
+        p_ = paths.get(sh)
+        if not p_:
+            return None, [], [], f"原始檔找不到工作表「{sh}」"
+        xml, stt = _xl_set_cells(zin.read(p_).decode("utf-8"), writes)
+        changed[p_] = xml.encode("utf-8")
+        for (r, c), st_ in stt.items():
+            info = meta[(sh, r, c)]
+            if st_ == "ok":
+                done.append(info)
+            else:
+                skipped.append(info + ("公式欄，Excel 自動計算" if st_ == "formula" else "找不到該列",))
+    # 網頁更新紀錄工作表
+    now = datetime.now().strftime("%Y/%m/%d %H:%M")
+    rows = [[f"網頁更新紀錄（{now} 由 ISO 50001 SEU 管理系統產生）"], [f"底稿：{base_name}"], [],
+            ["① 網頁新增設備（原始評估表沒有，請視需要自行複製到表4）"],
+            ["系統", "設備名稱", "設備編號", "設備型式", "部門", "棟別", "樓層", "消耗功率(kW)", "數量", "負載率",
+             "運轉時數(hr/年)", "設備年份", "自評重大性", "能效改善頻率", "改善執行難易度", "設備管理者", "外包商承攬商", "相關變數"]]
+    for n_ in plan["new"]:
+        rows.append([n_.get("系統別"), " ".join(str(n_.get("設備名稱") or "").split()), n_.get("設備編號"), n_.get("設備型式"),
+                     n_.get("設備部門"), n_.get("所在棟別"), n_.get("所在樓層"), _sf(n_.get("消耗功率(kW)")), _sf(n_.get("設備數量")),
+                     _sf(n_.get("負載率")), _sf(n_.get("運轉時數(hr/年)")), _sf(n_.get("設備年份")), _sf(n_.get("自評重大性")),
+                     _sf(n_.get("能效改善頻率")), _sf(n_.get("改善執行難易度")), n_.get("設備管理者"), n_.get("外包商承攬商"), n_.get("相關變數")])
+    if not plan["new"]:
+        rows.append(["（無）"])
+    rows += [[], ["② 修改明細（表4 中以網頁數值取代的儲存格）"], ["系統", "設備名稱", "設備編號", "欄位", "原本（Excel）", "改成（網頁）"]]
+    rows += [list(x) for x in done] or [["（無）"]]
+    if skipped:
+        rows += [[], ["③ 未寫入（公式欄由 Excel 自動計算）"], ["系統", "設備名稱", "設備編號", "欄位", "原本（Excel）", "網頁數值", "原因"]]
+        rows += [list(x) for x in skipped]
+    log_xml = _xl_log_sheet_xml(rows, [10, 22, 16, 22, 14, 14, 18, 12, 8, 8, 12, 10, 10, 10, 12, 12, 14, 14])
+    # workbook.xml／rels／Content_Types：加入新工作表；開啟時重新計算
+    wb = zin.read("xl/workbook.xml").decode("utf-8")
+    rels = zin.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+    ct = zin.read("[Content_Types].xml").decode("utf-8")
+    names = {_html.unescape(m) for m in re.findall(r'<sheet\b[^>]*\bname="([^"]+)"', wb)}
+    lname = SEU_LOG_SHEET
+    k_ = 2
+    while lname in names:
+        lname = f"{SEU_LOG_SHEET}({k_})"; k_ += 1
+    sid = max(int(x) for x in re.findall(r'<sheet\b[^>]*\bsheetId="(\d+)"', wb)) + 1
+    used = set(re.findall(r'\bId="(rId\d+)"', rels))
+    rn = 1
+    while f"rId{rn}" in used:
+        rn += 1
+    rid = f"rId{rn}"
+    existing = set(zin.namelist())
+    sn = 1
+    while f"xl/worksheets/sheet{sn}.xml" in existing:
+        sn += 1
+    sheet_part = f"xl/worksheets/sheet{sn}.xml"
+    wb = wb.replace("</sheets>", f'<sheet name="{_xml_esc(lname)}" sheetId="{sid}" r:id="{rid}"/></sheets>', 1)
+    if re.search(r"<calcPr\b", wb):
+        wb = re.sub(r"<calcPr\b([^>]*?)(/?)>", lambda m_: "<calcPr" + re.sub(r'\s*fullCalcOnLoad="[^"]*"', "", m_.group(1))
+                    + ' fullCalcOnLoad="1"' + m_.group(2) + ">", wb, count=1)
+    rels = rels.replace("</Relationships>", f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+                                            f'relationships/worksheet" Target="worksheets/sheet{sn}.xml"/></Relationships>', 1)
+    ct = ct.replace("</Types>", f'<Override PartName="/{sheet_part}" ContentType="application/vnd.openxmlformats-officedocument.'
+                                f'spreadsheetml.worksheet+xml"/></Types>', 1)
+    changed.update({"xl/workbook.xml": wb.encode("utf-8"), "xl/_rels/workbook.xml.rels": rels.encode("utf-8"),
+                    "[Content_Types].xml": ct.encode("utf-8")})
+    out = BytesIO()
+    with zipfile.ZipFile(out, "w") as zout:
+        for info in zin.infolist():
+            data = changed.get(info.filename)
+            zout.writestr(info, data if data is not None else zin.read(info.filename))
+        zout.writestr(zipfile.ZipInfo(sheet_part, date_time=datetime.now().timetuple()[:6]), log_xml.encode("utf-8"),
+                      compress_type=zipfile.ZIP_DEFLATED)
+    return out.getvalue(), done, skipped, None
+
+def seu_verify_xlsx(raw, new_bytes, done_cells):
+    """產生後自動檢查：①沒改的檔案內容逐位元組相同 ②改過的 XML 格式正確 ③改過的儲存格值正確、表4 其他儲存格不變
+    ④新工作表存在。done_cells：{(工作表, 列號, 欄號0起): 新值}。回傳錯誤清單（空＝通過）"""
+    import zipfile
+    import xml.etree.ElementTree as _ET
+    errs = []
+    zo, zn = zipfile.ZipFile(BytesIO(raw)), zipfile.ZipFile(BytesIO(new_bytes))
+    mod = {p for p in zn.namelist() if p not in zo.namelist() or zn.read(p) != zo.read(p)}
+    allowed_xml = {"xl/workbook.xml", "xl/_rels/workbook.xml.rels", "[Content_Types].xml"}
+    paths = _xl_sheet_paths(zo)
+    allowed_xml |= {paths[sh] for sh in {k[0] for k in done_cells}}
+    for p in mod:
+        if p in zo.namelist() and p not in allowed_xml:
+            errs.append(f"不應變動的檔案內容被改到：{p}")
+        try:
+            _ET.fromstring(zn.read(p))
+        except Exception as e:
+            errs.append(f"{p} XML 格式錯誤：{e}")
+    if len([p for p in mod if p not in zo.namelist()]) != 1:
+        errs.append("新增工作表數量不正確")
+    xo, xn = pd.ExcelFile(BytesIO(raw)), pd.ExcelFile(BytesIO(new_bytes))
+    if xn.sheet_names[:len(xo.sheet_names)] != xo.sheet_names or len(xn.sheet_names) != len(xo.sheet_names) + 1:
+        errs.append("工作表清單與原檔不符")
+    for sh in {k[0] for k in done_cells}:
+        do, dn = pd.read_excel(xo, sheet_name=sh, header=None), pd.read_excel(xn, sheet_name=sh, header=None)
+        for r_ in range(max(len(do), len(dn))):
+            for c_ in range(max(do.shape[1], dn.shape[1])):
+                vo = do.iat[r_, c_] if r_ < len(do) and c_ < do.shape[1] else None
+                vn = dn.iat[r_, c_] if r_ < len(dn) and c_ < dn.shape[1] else None
+                key = (sh, r_ + 1, c_)
+                if key in done_cells:
+                    if _mnorm(vn) != _mnorm(done_cells[key]):
+                        errs.append(f"{sh} {_xl_col(c_)}{r_ + 1} 應為 {done_cells[key]}，實際 {vn}")
+                elif _mnorm(vo) != _mnorm(vn):
+                    errs.append(f"{sh} {_xl_col(c_)}{r_ + 1} 不應變動（{vo} → {vn}）")
+                if len(errs) > 20:
+                    return errs
+    return errs
+
 def get_default_enb():
     """兩張能源基線追蹤表的預設示範資料（可於修改模式覆蓋）"""
     return {
@@ -2331,7 +2636,7 @@ def read_excel_for_merge(file_bytes):
             recs.extend(read_system(sh, s_, xls))
     return recs, missing
 
-def compare_excel_with_db(xl_recs, db):
+def compare_excel_with_db(xl_recs, db, with_match=False):
     """逐台比對。回傳 (items, 相同台數, 網頁有_Excel無的索引清單, 補填清單, 對應清單)
     對應清單每筆：{"kind": "pair", "xl", "db", "diffs", "default": 預設是否勾選, "warn": 提醒文字}
       ＝比對不到、但「同系統、同名稱、同部門、同棟別、同功率」的網頁設備（編號或位置不同），可能是同一台。
@@ -2443,6 +2748,10 @@ def compare_excel_with_db(xl_recs, db):
     for it in items:
         if it["kind"] == "new":
             it["dup"] = _pkey(xl_recs[it["xl"]]) in left
+    if with_match:                     # 「合併回 Excel」需要每筆 Excel 列對應到哪一台網頁設備：{Excel 索引: (網頁索引, "key"/"pair")}
+        _m = {j: (v[0], "key") for j, v in match.items()}
+        _m.update({j: (v[0], "pair") for j, v in pmatch.items()})
+        return items, n_same, web_only, fills, pairs, _m
     return items, n_same, web_only, fills, pairs
 
 def apply_excel_merge(db, xl_recs, items, fills=()):
@@ -5188,6 +5497,18 @@ elif "Excel" in menu:
         if _mg_up is not None:
             _mg_bytes = _mg_up.getvalue()
             _mg_hash = hashlib.md5(_mg_bytes).hexdigest()
+            # v3.8：這份評估表可一併保存為原始檔（供下方「合併回 Excel」當底稿，管理員可下載原檔）
+            _seu_list = st.session_state.setdefault("seu_files", seu_files_load())
+            if any(f_.get("md5") == _mg_hash for f_ in _seu_list):
+                st.caption("📁 這份 Excel 已保存為評估表原始檔。")
+            elif st.button("💾 同時保存為評估表原始檔", key=f"seu_save_from_merge_{_mg_hash[:6]}"):
+                _sm, _se = enb_store_file(_mg_bytes, _mg_up.name, prefix="seu_")
+                if _se:
+                    st.error(f"❌ {_se}")
+                else:
+                    _seu_list.append(_sm); seu_files_save(_seu_list)
+                    log_activity("評估表原始檔保存", f"{_mg_up.name}（{_sm['size'] / 1024:,.0f} KB）")
+                    st.success(f"✅ 已保存為評估表原始檔（{_sm['uploaded_at']}）")
             _mg_cache = st.session_state.get("merge_parse")
             if not _mg_cache or _mg_cache[0] != _mg_hash:
                 try:
@@ -5393,6 +5714,125 @@ elif "Excel" in menu:
                             "部門": _db[i].get("設備部門"),
                             "棟別／樓層": f"{_db[i].get('所在棟別') or ''} {_db[i].get('所在樓層') or ''}".strip(),
                         } for i in _web_only]), hide_index=True, use_container_width=True)
+
+    # ── v3.8：重大能源使用設備評估表：原始檔與合併回 Excel（網頁 → Excel）──
+    st.divider()
+    st.markdown("#### 📁 重大能源使用設備評估表：原始檔與合併回 Excel")
+    st.caption("原始評估表原封不動保存在雲端，管理員可下載與上傳時完全相同的檔案；「合併回 Excel」以原始檔為底，"
+               "只把網頁上更新過的設備欄位寫進表4 對應儲存格，網頁新增的設備與修改明細另放在最後一張「網頁更新紀錄」工作表，"
+               "其他工作表、格式、公式、圖表、外部連結全部保留。")
+    if _sf_msg := st.session_state.pop("seu_flash", None):
+        st.success(_sf_msg)
+    _seu_files = st.session_state.setdefault("seu_files", seu_files_load())
+    if st.session_state["edit_mode"]:
+        _su = st.file_uploader("上傳評估表原始檔（.xlsx）", type=["xlsx"], key=f"seu_up_{st.session_state.get('seu_up_ver', 0)}")
+        if _su is not None:
+            _sb_ = _su.getvalue()
+            if any(f_.get("md5") == hashlib.md5(_sb_).hexdigest() for f_ in _seu_files):
+                st.caption("這份檔案已經保存過了。")
+            elif st.button("💾 保存為評估表原始檔", type="primary", key="seu_save_go"):
+                _sm, _se = enb_store_file(_sb_, _su.name, prefix="seu_")
+                if _se:
+                    st.error(f"❌ {_se}")
+                else:
+                    _seu_files.append(_sm); seu_files_save(_seu_files)
+                    log_activity("評估表原始檔保存", f"{_su.name}（{_sm['size'] / 1024:,.0f} KB）")
+                    st.session_state["seu_flash"] = f"✅ 已保存評估表原始檔：{_su.name}"
+                    st.session_state["seu_up_ver"] = st.session_state.get("seu_up_ver", 0) + 1
+                    st.rerun()
+    if not _seu_files:
+        st.info("尚未保存評估表原始檔。可在上方「Excel 合併匯入」上傳後按「💾 同時保存為評估表原始檔」，或在修改模式直接上傳。")
+    else:
+        with st.expander(f"🗂️ 原始檔版本（{len(_seu_files)} 份，最新在上）", expanded=False):
+            for _i, _m in enumerate(reversed(_seu_files)):
+                _c1, _c2 = st.columns([3, 2], vertical_alignment="center")
+                _c1.markdown(f"**{_m['name']}**" + ("　🆕 最新" if _i == 0 else "")
+                             + f"<br><span style='font-size:0.85em;color:#64748b'>上傳於 {_m['uploaded_at']}｜{_m['size'] / 1024:,.0f} KB｜"
+                               f"MD5 {_m['md5']}｜{'☁️ 雲端' if _m.get('where') == 'cloud' else '💾 本機'}</span>", unsafe_allow_html=True)
+                with _c2:
+                    _enb_download_button(_m, f"seu_{_m['key']}")
+        st.markdown("**📝 網頁資料合併回 Excel**")
+        _base = st.selectbox("底稿（原始評估表版本）", list(reversed(_seu_files)),
+                             format_func=lambda m: f"{m['name']}（{m['uploaded_at']}）", key="seu_base")
+        if st.button("🔄 比對網頁與 Excel", use_container_width=True, key="seu_cmp_go"):
+            _raw, _rerr = _enb_get_raw(_base)
+            if _rerr:
+                st.error(f"❌ {_rerr}")
+            else:
+                with st.spinner("比對中…"):
+                    st.session_state["seu_plan"] = {"key": _base["key"], "plan": seu_build_plan(_raw, st.session_state["db"])}
+                st.session_state.pop("seu_out", None)
+        _sp = st.session_state.get("seu_plan")
+        if _sp and _sp["key"] == _base["key"]:
+            _pl = _sp["plan"]
+            _upd = [k for k, d in enumerate(_pl["devices"]) if d["kind"] == "update"]
+            _par = [k for k, d in enumerate(_pl["devices"]) if d["kind"] == "pair"]
+            _q1, _q2, _q3, _q4, _q5 = st.columns(5)
+            _q1.metric("⚪ 相同", f"{_pl['same']} 台")
+            _q2.metric("🟡 網頁有更新", f"{len(_upd)} 台")
+            _q3.metric("🟣 編號／位置不同", f"{len(_par)} 台")
+            _q4.metric("🟢 網頁新增", f"{len(_pl['new'])} 台")
+            _q5.metric("⚫ Excel 才有", f"{len(_pl['excel_only'])} 台")
+            _rows = []
+            for k, d in enumerate(_pl["devices"]):
+                _rows.append({"寫回": True, "類別": "🟡 網頁有更新" if d["kind"] == "update" else "🟣 編號／位置不同",
+                              "系統": d["sys"], "設備": d["name"], "編號（網頁）": d["code"], "工作表／列": f"{d['sheet'][:4]} 第 {d['row']} 列",
+                              "修改內容": "；".join(f"{_MERGE_LABEL.get(f, f)} {ov or '（空白）'} → {nv:g}" if isinstance(nv, float)
+                                                  else f"{_MERGE_LABEL.get(f, f)} {ov or '（空白）'} → {nv}" for f, _c, ov, nv in d["writes"])})
+            if _rows:
+                st.caption("取消勾選的設備不會寫回；公式儲存格（例如自動計算的欄位）一律不覆蓋，會列在紀錄表第③段。")
+                _ed = st.data_editor(pd.DataFrame(_rows), hide_index=True, use_container_width=True, key=f"seu_ed_{_base['key']}",
+                                     disabled=[c for c in _rows[0] if c != "寫回"],
+                                     column_config={"寫回": st.column_config.CheckboxColumn("寫回", width="small"),
+                                                    "修改內容": st.column_config.TextColumn("修改內容", width="large")})
+                _picked = [k for k, v in enumerate(_ed["寫回"].tolist()) if v]
+            else:
+                st.success("✅ 表4 裡的設備和網頁一致，沒有要寫回的儲存格。")
+                _picked = []
+            if _pl["new"]:
+                with st.expander(f"🟢 網頁新增的 {len(_pl['new'])} 台（寫進「網頁更新紀錄」第①段）"):
+                    st.dataframe(pd.DataFrame([{"系統": n.get("系統別"), "設備": " ".join(str(n.get("設備名稱") or "").split()),
+                                                "編號": n.get("設備編號"), "部門": n.get("設備部門"),
+                                                "棟別／樓層": f"{n.get('所在棟別') or ''} {n.get('所在樓層') or ''}".strip()}
+                                               for n in _pl["new"]]), hide_index=True, use_container_width=True)
+            if _pl["excel_only"]:
+                with st.expander(f"⚫ Excel 才有的 {len(_pl['excel_only'])} 台（保留不動）"):
+                    st.dataframe(pd.DataFrame(_pl["excel_only"], columns=["系統", "設備", "編號"]), hide_index=True, use_container_width=True)
+            if st.button(f"📝 產生更新後 Excel（寫回 {len(_picked)} 台＋網頁更新紀錄）", type="primary",
+                         use_container_width=True, key="seu_build_go"):
+                _raw, _rerr = _enb_get_raw(_base)
+                if _rerr:
+                    st.error(f"❌ {_rerr}")
+                else:
+                    with st.spinner("產生並檢查中…"):
+                        _nb, _done, _skip, _berr = seu_build_xlsx(_raw, _pl, _picked, _base["name"])
+                        _dc = {}
+                        if not _berr:
+                            _dset = {x[:4] for x in _done}
+                            for k in _picked:
+                                d = _pl["devices"][k]
+                                for f, c, ov, nv in d["writes"]:
+                                    if (d["sys"], d["name"], d["code"], f) in _dset:
+                                        _dc[(d["sheet"], d["row"], c)] = nv
+                            _verr = seu_verify_xlsx(_raw, _nb, _dc)
+                    if _berr:
+                        st.error(f"❌ {_berr}")
+                    elif _verr:
+                        st.error("❌ 自動檢查沒有通過，為避免產生錯誤的評估表，這次不提供下載：\n\n" + "\n".join(f"- {e}" for e in _verr[:10]))
+                    else:
+                        _stem = re.sub(r"\.xlsx$", "", _base["name"], flags=re.I)
+                        st.session_state["seu_out"] = {"key": _base["key"], "bytes": _nb,
+                                                       "name": f"{_stem}_網頁更新_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                                                       "done": len(_done), "skip": len(_skip)}
+                        log_activity("評估表合併回 Excel", f"底稿 {_base['name']}：寫入 {len(_done)} 格、公式欄略過 {len(_skip)} 格、"
+                                     f"網頁新增 {len(_pl['new'])} 台")
+            _so = st.session_state.get("seu_out")
+            if _so and _so["key"] == _base["key"]:
+                st.success(f"✅ 已產生並通過檢查：寫入 {_so['done']} 格"
+                           + (f"、公式欄略過 {_so['skip']} 格" if _so["skip"] else "") + "。開啟時 Excel 會自動重新計算評分。")
+                st.download_button(f"⬇️ 下載 {_so['name']}", _so["bytes"], file_name=_so["name"],
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   use_container_width=True, key="seu_out_dl")
 
     st.divider()
     st.markdown("#### 🔁 整批覆蓋（原功能）")
