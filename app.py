@@ -2085,6 +2085,57 @@ def enb_store_file(file_bytes, orig_name, prefix=""):
     except Exception as e:
         return None, f"原始檔存到雲端失敗：{type(e).__name__}：{str(e)[:150]}"
 
+def enb_delete_file(meta):
+    """刪除一個原始檔版本：雲端 Storage 檔案＋本機副本。回傳錯誤（None＝成功）"""
+    try:
+        lp = os.path.join(ENB_LOCAL_DIR, meta["key"])
+        if os.path.exists(lp):
+            os.remove(lp)
+    except Exception:
+        pass
+    sb = get_supabase_client()
+    if not sb or meta.get("where") != "cloud":
+        return None
+    try:
+        sb.storage.from_(ENB_BUCKET).remove([meta["key"]])
+        return None
+    except Exception as e:
+        return f"刪除雲端檔案失敗：{type(e).__name__}：{str(e)[:150]}"
+
+def _ver_delete_ui(meta, is_latest, files, save_fn, label, key_sfx):
+    """原始檔版本的刪除鍵（v3.8，選項 A）：修改模式才顯示；最新版本不能刪；按了要再確認一次。
+    刪除成功回傳 True（呼叫端 rerun）"""
+    if not st.session_state.get("edit_mode"):
+        return False
+    if is_latest:
+        st.button("🗑️ 刪除", disabled=True, use_container_width=True, key=f"vdel_{key_sfx}",
+                  help="最新版本是目前網頁使用中的資料來源，不能刪除")
+        return False
+    ck = "ver_del_confirm"
+    if st.session_state.get(ck) != meta["key"]:
+        if st.button("🗑️ 刪除", use_container_width=True, key=f"vdel_{key_sfx}"):
+            st.session_state[ck] = meta["key"]
+            st.rerun()
+        return False
+    st.warning(f"確定要刪除 {meta['uploaded_at']} 上傳的「{meta['name']}」？刪除後無法復原。")
+    b1, b2 = st.columns(2)
+    if b1.button("確定刪除", type="primary", use_container_width=True, key=f"vdel_ok_{key_sfx}"):
+        err = enb_delete_file(meta)
+        if err:
+            st.error(f"❌ {err}")
+            return False
+        files[:] = [f for f in files if f.get("key") != meta["key"]]
+        save_fn()
+        if (st.session_state.get("enb_raw") or {}).get("key") == meta["key"]:
+            st.session_state.pop("enb_raw", None)
+        st.session_state.pop(ck, None)
+        log_activity(f"{label}原始檔刪除", f"{meta['name']}（上傳於 {meta['uploaded_at']}，MD5 {meta['md5'][:12]}）")
+        return True
+    if b2.button("取消", use_container_width=True, key=f"vdel_no_{key_sfx}"):
+        st.session_state.pop(ck, None)
+        st.rerun()
+    return False
+
 def enb_fetch_file(meta):
     """取回原始檔，回傳 (bytes, 錯誤)；一律比對 MD5，確認與上傳時完全相同"""
     if not meta:
@@ -5483,6 +5534,9 @@ elif menu == "能源基線資料管理":
                              unsafe_allow_html=True)
                 with _c2:
                     _enb_download_button(_m, f"ver_{_m['key']}")
+                    if _ver_delete_ui(_m, _i == 0, _files, lambda: save_enb(_enb), "能源基線", f"enb_{_m['key']}"):
+                        st.session_state["enb_flash"] = f"🗑️ 已刪除 {_m['uploaded_at']} 上傳的「{_m['name']}」"
+                        st.rerun()
 
         # ── 4. 限制資料檢視 ──
         st.markdown("#### 🔒 原始數據檢視（限制資料）")
@@ -5772,6 +5826,11 @@ elif "Excel" in menu:
                                f"MD5 {_m['md5']}｜{'☁️ 雲端' if _m.get('where') == 'cloud' else '💾 本機'}</span>", unsafe_allow_html=True)
                 with _c2:
                     _enb_download_button(_m, f"seu_{_m['key']}")
+                    if _ver_delete_ui(_m, _i == 0, _seu_files, lambda: seu_files_save(_seu_files), "評估表", f"seu_{_m['key']}"):
+                        st.session_state["seu_flash"] = f"🗑️ 已刪除 {_m['uploaded_at']} 上傳的「{_m['name']}」"
+                        st.session_state.pop("seu_plan", None)
+                        st.session_state.pop("seu_out", None)
+                        st.rerun()
         st.markdown("**📝 網頁資料合併回 Excel**")
         _base = st.selectbox("底稿（原始評估表版本）", list(reversed(_seu_files)),
                              format_func=lambda m: f"{m['name']}（{m['uploaded_at']}）", key="seu_base")
